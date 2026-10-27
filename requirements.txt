@@ -1,0 +1,3 @@
+# dsh-bili-live 的 Python 依赖（装进插件自己的 venv，别装进系统 Python）
+bilibili-api-python>=17.0.0
+mcp>=1.2.0
