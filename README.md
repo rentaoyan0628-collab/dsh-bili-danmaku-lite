@@ -1,5 +1,11 @@
 # dsh-bili-live
 
+**DeepSeek Harness (DSH) Bilibili Live Plugin / B站直播弹幕 AI 插件**：实时读取 Bilibili 直播间弹幕、在用户授权后发送弹幕，并提供可选的 AI 自动陪聊。无需 QQBridge 或 QQ 机器人。
+
+**English:** An independent DeepSeek Harness plugin for Bilibili live chat (danmaku): read live room events, send messages with user-controlled permissions, and optionally use AI to decide when to reply. No QQ bot required. Version 0.2 handles text events only, **not** audio or video.
+
+**关键词 / Keywords:** DSH plugin · DeepSeek Harness · Bilibili Live · B站直播 · 弹幕 danmaku · AI auto chat · live room assistant
+
 给 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）用的 **B站直播间插件**：看弹幕、发弹幕、挂着听、可选自动陪聊。
 
 > **v0.2 范围**：只做弹幕与配置，**不含音视频**（不拉流、不转写、不看画面）。
