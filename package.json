@@ -1,7 +1,7 @@
 {
   "name": "dsh-bili-live",
   "version": "0.2.0",
-  "description": "B站直播间：看弹幕 / 发弹幕（人在设置页放行）/ 挂着听 / 可选自动陪聊。独立插件，不需要 QQ 桥接。",
+  "description": "DeepSeek Harness (DSH) Bilibili Live 弹幕插件：实时监听、授权发弹幕、可选 AI 自动陪聊；无需 QQBridge。",
   "license": "MIT",
   "type": "module",
   "main": "index.js",
@@ -55,5 +55,15 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "bilibili",
+    "bilibili-live",
+    "danmaku",
+    "ai-chatbot",
+    "live-chat"
+  ]
 }
