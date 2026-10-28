@@ -29,7 +29,7 @@ const defineTool = hostDeps.defineTool
 
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -170,6 +170,31 @@ function pythonCandidates() {
   push('python')
   push('python3')
   return out
+}
+
+/**
+ * 网页端能写进来的 Python 路径，只认这三种：
+ *   1) 插件自己的 venv（$DSH_HOME/bili-live/.venv 里）
+ *   2) 本机自动探测到的候选（doctor 会试的那些）
+ *   3) 首次配置（当前还空着）且文件名就是个 python 可执行文件
+ * 其余一律拒绝。理由：设置页是网页，能改 pythonPath = 能让插件替我执行任意程序；
+ * 真要换别的解释器，请直接改 config.json（本机文件，有文件系统权限才写得动）。
+ */
+function pythonPathAllowed(next) {
+  const p = String(next || '').trim()
+  if (!p) return { ok: true }
+  const abs = (() => { try { return resolve(p) } catch { return p } })()
+  const venv = resolve(HOME, '.venv')
+  if (abs === venv || abs.startsWith(venv + sep)) return { ok: true }
+  for (const cand of pythonCandidates()) {
+    try { if (resolve(cand) === abs) return { ok: true } } catch { /* 跳过坏路径 */ }
+  }
+  if (!cfg.pythonPath && /^python(3(\.\d+)?)?(\.exe)?$/i.test(basename(abs))) return { ok: true }
+  return {
+    ok: false,
+    error: '这个 Python 路径不接受：网页端只允许写 bili-live/.venv 里的解释器，或本机自动探测到的那个；'
+      + '要换别的请直接改 ' + CONFIG_FILE + '（本机文件）。',
+  }
 }
 
 function pythonEnv() {
@@ -724,10 +749,110 @@ function markRequestDone(roomId) {
   } catch (e) { log('回写待批清单失败：' + (e?.message ?? e)) }
 }
 
+/* ── 来源校验（0.3.0）────────────────────────────────────────────
+ * 这些接口能改配置、能动放行名单、能发弹幕，所以不能"谁能连上 127.0.0.1 就算谁"：
+ *   ① 先过 DSH 的信任栅栏 connection.requestRejection —— 那是宿主级鉴权（认 cookie/token），
+ *      即使有人用隧道/反代把 Host 改写成回环也挡得住；
+ *   ② 再过一层"本机同源"兜底：Host 必须是回环，Origin/Referer 必须同端口
+ *      （挡浏览器里另一个本地页面借用户身份驱动这些写接口）；栅栏拿不到时这层就是唯一防线，
+ *      两道都不成 ⇒ 拒。
+ * 写法与 dsh-bili-scroll 线上那套一致（它的 issue #88 踩过同一个坑）。
+ */
+function makeRouteGuard(ctx) {
+  let connCache = null
+  let connTried = false
+  let fenceWarned = false
+  let fenceOk = false
+
+  const getConnection = () => {
+    if (connTried) return connCache
+    connTried = true
+    const tries = [
+      ['ctx.get("connection")', () => (typeof ctx.get === 'function' ? ctx.get('connection') : null)],
+      ['Reflect.get(ctx, "connection")', () => Reflect.get(ctx, 'connection')],
+      ['ctx.root.connection', () => (ctx.root && typeof ctx.root === 'object' ? ctx.root.connection : null)],
+    ]
+    for (const [how, fn] of tries) {
+      try {
+        const c = fn()
+        if (c && typeof c.requestRejection === 'function') {
+          connCache = c
+          fenceOk = true
+          log('来源校验：用 ' + how + ' 拿到了宿主的信任栅栏 ✓')
+          return c
+        }
+      } catch { /* 换下一个 */ }
+    }
+    log('⚠️ 拿不到宿主的信任栅栏（connection.requestRejection）⇒ 只靠"本机同源"这一道')
+    return null
+  }
+
+  const fenceReject = (req, res) => {
+    const conn = getConnection()
+    if (!conn) {
+      if (!fenceWarned) { fenceWarned = true; log('⚠️ 信任栅栏不可用，写接口只靠本机同源守') }
+      return false
+    }
+    try {
+      const rejection = conn.requestRejection({ headers: req.headers })
+      if (rejection === undefined || rejection === null || rejection === false) return false
+      res.statusCode = typeof rejection === 'number' ? rejection : 403
+      try { res.end() } catch { /* 已经关了 */ }
+      return true
+    } catch (err) {
+      log('信任栅栏调用出错，按不通过处理：' + String(err?.message ?? err))
+      res.statusCode = 403
+      try { res.end() } catch { /* 已经关了 */ }
+      return true
+    }
+  }
+
+  const sameOriginOk = (req) => {
+    try {
+      const host = String(req.headers.host || '')
+      if (!host) return true // 没有 Host 头 = 不是浏览器发来的（本机脚本 / 宿主内部）
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)) return false
+      const pick = String(req.headers.origin || req.headers.referer || '')
+      if (!pick) return true
+      try {
+        const u = new URL(pick)
+        const hostAuthority = host.toLowerCase()
+        if (String(u.host || '').toLowerCase() === hostAuthority) return true
+        const defaultPort = u.protocol === 'https:' ? '443' : '80'
+        return (u.hostname + ':' + (u.port || defaultPort)).toLowerCase() === hostAuthority
+      } catch { return false }
+    } catch { return false }
+  }
+
+  /** true = 放行；false = 已经回过响应了，别再写 */
+  return function guard(req, res) {
+    if (fenceReject(req, res)) return false
+    if (!sameOriginOk(req)) {
+      try { sendJson(res, 403, { ok: false, error: '只接受本机同源请求：Host 必须是回环地址，Origin/Referer 必须是同一个端口' }) } catch { /* 已经关了 */ }
+      return false
+    }
+    return true
+  }
+}
+
 function registerRoutes(ctx) {
+  const guard = makeRouteGuard(ctx)
   const route = (path, handler) => {
     try {
-      ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler }))
+      ctx.effect(() => ctx.webServer.register({
+        kind: 'exact',
+        path,
+        handler: async (req, res) => {
+          if (!guard(req, res)) return
+          try {
+            await handler(req, res)
+          } catch (e) {
+            // 每个 handler 内部都自己 catch 了；这里是最后一道，且绝不写第二次响应
+            if (!res.headersSent) sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
+            log('路由 ' + path + ' 抛错：' + String(e?.message ?? e))
+          }
+        },
+      }))
     } catch (e) { log('注册路由失败 ' + path + '：' + (e?.message ?? e)) }
   }
 
@@ -757,6 +882,11 @@ function registerRoutes(ctx) {
     try {
       if (req.method === 'POST') {
         const patch = await readBody(req)
+        // ⭐ 0.3.0：网页端不许把插件指到任意可执行程序上（维护者 polang233 的复核意见）
+        if (patch && Object.prototype.hasOwnProperty.call(patch, 'pythonPath')) {
+          const gate = pythonPathAllowed(patch.pythonPath)
+          if (!gate.ok) return sendJson(res, 403, { ok: false, error: gate.error, config: cfg })
+        }
         persistCfg(patch)
         log('设置已改：' + JSON.stringify(patch).slice(0, 200))
         // 改了 python 路径就把旧的 MCP 关掉，下一条消息会按新解释器重建
@@ -843,6 +973,8 @@ function registerRoutes(ctx) {
       if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '用 POST' })
       const body = await readBody(req)
       if (!cfg.sendEnabled) return sendJson(res, 400, { ok: false, error: '「允许发弹幕」是关的，先打开它' })
+      // 房间授权不在这一层判：真正的闸在 live_mcp.py 的 bili_live_send —— 房间不在
+      // live-allow.json 里一律拒绝。这里只是入口，不放宽任何权限。
       const r = jsonish(await call('bili_live_send', {
         room_id: String(body.room_id || ''),
         text: String(body.text || ''),

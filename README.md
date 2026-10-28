@@ -123,6 +123,18 @@ dsh plugin --profile desktop add dsh-bili-live
 - `botName`：它在房里的名字，用来判断「有人点名」。
 - `autoChat.minGapSec` / `perHour` / `maxChars`：两次开口的间隔、每小时上限、单句字数上限。
 
+## 安全：设置页那几个接口怎么守的（v0.3.0）
+
+插件在宿主里注册了 `/dsh-bili-live/*` 一组本地 HTTP 接口，给设置页用。这些接口能改配置、能动放行名单、能发弹幕，所以不是"能连上本机端口就算数"：
+
+1. **先过 DSH 的信任栅栏** `connection.requestRejection` —— 宿主级鉴权（认 cookie/token），隧道或反代把 Host 改写成回环也挡得住；
+2. **再过本机同源** —— Host 必须是回环地址，Origin/Referer 必须同端口（挡掉浏览器里另一个本地页面借你的登录态驱动这些写接口）；
+3. 栅栏拿不到时（老宿主）不静默放行，第 2 条就是唯一防线，两道都不成一律 403。
+
+另外 **网页端不许把插件指到任意可执行程序**：`pythonPath` 只接受三种值——插件自己的 venv、本机自动探测到的解释器、或首次配置时填的 python 可执行文件；其它路径返回 403，要换请直接改 `config.json`（本机文件）。
+
+发弹幕的房间授权不在这层放宽：真正的闸在 `python/live_mcp.py` 的 `bili_live_send` —— 房间不在 `live-allow.json` 里一律拒绝。
+
 ## 数据都在哪
 
 `$DSH_HOME/bili-live/`（可用环境变量 `DSH_BILI_LIVE_HOME` 改）：

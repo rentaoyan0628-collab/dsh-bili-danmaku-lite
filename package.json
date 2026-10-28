@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-live",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DeepSeek Harness (DSH) Bilibili Live 弹幕插件：实时监听、授权发弹幕、可选 AI 自动陪聊；无需 QQBridge。",
   "license": "MIT",
   "repository": {
