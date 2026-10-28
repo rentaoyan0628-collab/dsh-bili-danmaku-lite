@@ -3,6 +3,12 @@
   "version": "0.2.0",
   "description": "DeepSeek Harness (DSH) Bilibili Live 弹幕插件：实时监听、授权发弹幕、可选 AI 自动陪聊；无需 QQBridge。",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rentaoyan0628-collab/dsh-bili-live.git"
+  },
+  "homepage": "https://github.com/rentaoyan0628-collab/dsh-bili-live#readme",
+  "bugs": { "url": "https://github.com/rentaoyan0628-collab/dsh-bili-live/issues" },
   "type": "module",
   "main": "index.js",
   "exports": {
