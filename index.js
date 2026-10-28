@@ -28,8 +28,8 @@ const hostDeps = await loadHostDeps()
 const defineTool = hostDeps.defineTool
 
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -176,25 +176,42 @@ function pythonCandidates() {
  * 网页端能写进来的 Python 路径，只认这三种：
  *   1) 插件自己的 venv（$DSH_HOME/bili-live/.venv 里）
  *   2) 本机自动探测到的候选（doctor 会试的那些）
- *   3) 首次配置（当前还空着）且文件名就是个 python 可执行文件
+ *   不提供首次配置例外：只接受固定 venv 或本机配置已明确指定的路径。
  * 其余一律拒绝。理由：设置页是网页，能改 pythonPath = 能让插件替我执行任意程序；
  * 真要换别的解释器，请直接改 config.json（本机文件，有文件系统权限才写得动）。
  */
-function pythonPathAllowed(next) {
+function interpreterPathAllowed(next, trusted = []) {
   const p = String(next || '').trim()
   if (!p) return { ok: true }
-  const abs = (() => { try { return resolve(p) } catch { return p } })()
-  const venv = resolve(HOME, '.venv')
-  if (abs === venv || abs.startsWith(venv + sep)) return { ok: true }
-  for (const cand of pythonCandidates()) {
-    try { if (resolve(cand) === abs) return { ok: true } } catch { /* 跳过坏路径 */ }
-  }
-  if (!cfg.pythonPath && /^python(3(\.\d+)?)?(\.exe)?$/i.test(basename(abs))) return { ok: true }
-  return {
-    ok: false,
-    error: '这个 Python 路径不接受：网页端只允许写 bili-live/.venv 里的解释器，或本机自动探测到的那个；'
-      + '要换别的请直接改 ' + CONFIG_FILE + '（本机文件）。',
-  }
+  const deny = { ok: false, error: '网页端只允许插件固定 venv 解释器或已由本机配置明确指定的解释器；其它路径请由管理员直接修改本机配置文件。' }
+  if (!isAbsolute(p)) return deny
+  try {
+    if (!statSync(p).isFile()) return deny
+    const canonical = (v) => {
+      const value = realpathSync(v)
+      return process.platform === 'win32' ? value.toLowerCase() : value
+    }
+    const target = canonical(p)
+    // An existing local config/environment is trusted input, never discovered from a web request.
+    for (const candidate of trusted) {
+      if (candidate && isAbsolute(candidate)) {
+        try { if (target === canonical(candidate) && statSync(candidate).isFile()) return { ok: true } } catch { /* unavailable */ }
+      }
+    }
+    const venv = realpathSync(join(HOME, '.venv'))
+    const root = process.platform === 'win32' ? venv.toLowerCase() : venv
+    for (const fixed of [join(HOME, '.venv', 'Scripts', 'python.exe'), join(HOME, '.venv', 'bin', 'python'), join(HOME, '.venv', 'bin', 'python3')]) {
+      try {
+        const actual = canonical(fixed)
+        if (actual.startsWith(root + sep) && actual === target) return { ok: true }
+      } catch { /* absent interpreter */ }
+    }
+  } catch { /* missing file or invalid path: fail closed */ }
+  return deny
+}
+
+function pythonPathAllowed(next) {
+  return interpreterPathAllowed(next, [cfg.pythonPath, process.env.DSH_BILI_LIVE_PYTHON])
 }
 
 function pythonEnv() {
@@ -754,19 +771,13 @@ function markRequestDone(roomId) {
  *   ① 先过 DSH 的信任栅栏 connection.requestRejection —— 那是宿主级鉴权（认 cookie/token），
  *      即使有人用隧道/反代把 Host 改写成回环也挡得住；
  *   ② 再过一层"本机同源"兜底：Host 必须是回环，Origin/Referer 必须同端口
- *      （挡浏览器里另一个本地页面借用户身份驱动这些写接口）；栅栏拿不到时这层就是唯一防线，
- *      两道都不成 ⇒ 拒。
+ *      （挡跨源请求）；认证服务拿不到或异常时拒绝访问，不降级放行。
  * 写法与 dsh-bili-scroll 线上那套一致（它的 issue #88 踩过同一个坑）。
  */
 function makeRouteGuard(ctx) {
-  let connCache = null
-  let connTried = false
   let fenceWarned = false
-  let fenceOk = false
 
   const getConnection = () => {
-    if (connTried) return connCache
-    connTried = true
     const tries = [
       ['ctx.get("connection")', () => (typeof ctx.get === 'function' ? ctx.get('connection') : null)],
       ['Reflect.get(ctx, "connection")', () => Reflect.get(ctx, 'connection')],
@@ -776,26 +787,24 @@ function makeRouteGuard(ctx) {
       try {
         const c = fn()
         if (c && typeof c.requestRejection === 'function') {
-          connCache = c
-          fenceOk = true
           log('来源校验：用 ' + how + ' 拿到了宿主的信任栅栏 ✓')
           return c
         }
       } catch { /* 换下一个 */ }
     }
-    log('⚠️ 拿不到宿主的信任栅栏（connection.requestRejection）⇒ 只靠"本机同源"这一道')
+    if (!fenceWarned) { fenceWarned = true; log('宿主认证服务不可用，全部插件 HTTP 接口拒绝访问') }
     return null
   }
 
-  const fenceReject = (req, res) => {
+  const fenceReject = async (req, res) => {
     const conn = getConnection()
     if (!conn) {
-      if (!fenceWarned) { fenceWarned = true; log('⚠️ 信任栅栏不可用，写接口只靠本机同源守') }
-      return false
+      sendJson(res, 503, { ok: false, error: '宿主认证服务不可用；拒绝访问，请恢复认证服务后再试。' })
+      return true
     }
     try {
-      const rejection = conn.requestRejection({ headers: req.headers })
-      if (rejection === undefined || rejection === null || rejection === false) return false
+      const rejection = await conn.requestRejection({ headers: req.headers })
+      if (rejection === undefined) return false
       res.statusCode = typeof rejection === 'number' ? rejection : 403
       try { res.end() } catch { /* 已经关了 */ }
       return true
@@ -810,7 +819,7 @@ function makeRouteGuard(ctx) {
   const sameOriginOk = (req) => {
     try {
       const host = String(req.headers.host || '')
-      if (!host) return true // 没有 Host 头 = 不是浏览器发来的（本机脚本 / 宿主内部）
+      if (!host) return false // Host 缺失不能作为本机或可信身份依据
       if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)) return false
       const pick = String(req.headers.origin || req.headers.referer || '')
       if (!pick) return true
@@ -825,8 +834,8 @@ function makeRouteGuard(ctx) {
   }
 
   /** true = 放行；false = 已经回过响应了，别再写 */
-  return function guard(req, res) {
-    if (fenceReject(req, res)) return false
+  return async function guard(req, res) {
+    if (await fenceReject(req, res)) return false
     if (!sameOriginOk(req)) {
       try { sendJson(res, 403, { ok: false, error: '只接受本机同源请求：Host 必须是回环地址，Origin/Referer 必须是同一个端口' }) } catch { /* 已经关了 */ }
       return false
@@ -843,7 +852,7 @@ function registerRoutes(ctx) {
         kind: 'exact',
         path,
         handler: async (req, res) => {
-          if (!guard(req, res)) return
+          if (!await guard(req, res)) return
           try {
             await handler(req, res)
           } catch (e) {
