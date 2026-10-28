@@ -42,6 +42,14 @@
 
 ## 安装
 
+从 GitHub 源码安装到 desktop profile：
+
+```bash
+dsh plugin --profile desktop add github:rentaoyan0628-collab/dsh-bili-live
+```
+
+当前尚未发布 npm 包；不要使用 `dsh plugin --profile desktop add dsh-bili-live`，除非已确认 npm 包由本仓库维护者发布。安装插件后仍需完成下面的 Python 依赖和 B站凭证配置。
+
 1. 把整个目录放进 DSH 的插件位置（或 `npm i` 到 profile 里），然后在 `dsh.profile.bundles` 里列出 `dsh-bili-live`。
    插件自带的 `cordis.patch.yml` 只插入一条默认配置（默认全关）。
 
