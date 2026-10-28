@@ -2,13 +2,14 @@
 
 **DeepSeek Harness (DSH) Bilibili Live Plugin / B站直播弹幕 AI 插件**：实时读取 Bilibili 直播间弹幕、在用户授权后发送弹幕，并提供可选的 AI 自动陪聊。无需 QQBridge 或 QQ 机器人。
 
-**English:** An independent DeepSeek Harness plugin for Bilibili live chat (danmaku): read live room events, send messages with user-controlled permissions, and optionally use AI to decide when to reply. No QQ bot required. Version 0.2 handles text events only, **not** audio or video.
+**English:** An independent DeepSeek Harness plugin for Bilibili live chat (danmaku): read live room events, send messages with user-controlled permissions, and optionally use AI to decide when to reply. No QQ bot required. v0.2 is text only; **v0.4 adds optional audio transcription** (speech-to-text of the stream) — still **no video / no vision**.
 
 **关键词 / Keywords:** DSH plugin · DeepSeek Harness · Bilibili Live · B站直播 · 弹幕 danmaku · AI auto chat · live room assistant
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）用的 **B站直播间插件**：看弹幕、发弹幕、挂着听、可选自动陪聊。
 
-> **v0.2 范围**：只做弹幕与配置，**不含音视频**（不拉流、不转写、不看画面）。
+> **v0.4 范围**：弹幕 + 配置 + **可选「听声音」**（把直播里的说话转成文字，给自动陪聊当上下文）。
+> **不看画面**：不抽帧、不做视觉理解。
 > 所有「进入某房间」「发弹幕」的动作都在**人**手里 —— 模型只能申请，放行在设置页里点。
 
 ## 它能做什么
@@ -20,7 +21,8 @@
 | **发弹幕** | 模型（要 `confirm=true`）或设置页 | 默认关；同一房间 60 秒 1 条；每次写日志 |
 | **申请进入某房间** | 模型 | 只写一条待批申请，**放行必须人来点** |
 | **挂着听** | 模型或设置页 | 后台 worker 收弹幕写 hint，够得着时 POST 到你的 webhook |
-| **自动陪聊** | 设置页开关 | 定时读增量弹幕 → 调一次模型判断要不要接话 → 写进队列由 worker 发 |
+| **自动陪聊** | 设置页开关 | 定时读增量弹幕（有转录时也读转录）→ 调一次模型判断要不要接话 → 写进队列由 worker 发 |
+| **听声音 / 语音转写**（v0.4） | 模型或设置页 | 后台拉流 → 分段 → 语音识别成带时间戳的文字；**只转文字，不发弹幕**；默认只留最近 5 分钟 |
 
 ## 它和「刷B站」插件、以及网上那些直播弹幕机器人，差别在哪
 
@@ -35,7 +37,7 @@
 | 记录 | 每次发送（含**草稿/被拦/失败**）都写 `logs/danmaku.jsonl`，事后能查「打算发什么、最后发没发」 | 有报告 | 多半只 log 错误 |
 | 依赖 | 一个 Python venv + DSH 自己 | DSH | 往往要 Node/Go 服务、Redis、数据库、自建面板 |
 | 人格与记忆 | 不自己存对话历史，人格交给宿主（DSH 的 prompt / 记忆），插件只负责「进房、看、说」 | 宿主负责 | 多数内置自己的 prompt 和会话库 |
-| 音视频 | **不做**（v0.2 明确不拉流、不转写、不看画面） | 不含 | 有些项目会录 15 秒音频做 ASR 或抽帧做视觉，代价是带宽、显存和隐私 |
+| 音视频 | 只做**耳朵**（v0.4：可选转写，默认关；不抽帧、不看画面）；转写文本只留最近几分钟 | 不含 | 有些项目会录 15 秒音频做 ASR 或抽帧做视觉，代价是带宽、显存和隐私 |
 | 凭据 | B站 cookie 只落本机运行目录，不进仓库、不进发布包 | 同 | 有的项目要求填在配置文件里并提交 |
 
 一句话：**别人做的是「让机器人尽量多说话」，这里做的是「让人始终有权决定它能不能进、能不能说」**。
@@ -87,6 +89,42 @@ dsh plugin --profile desktop add dsh-bili-live
 4. **自动陪聊**（可选）：选 provider / 模型、写人设、定节奏，然后勾「启用」。
    它大多数时候会选择沉默（模型回 `SKIP`），只在真有意思时才说一句。
 
+## 听声音（v0.4.0，可选）
+
+把直播里的**说话**转成文字，给自动陪聊当上下文。只做耳朵：**不抽帧、不看画面、不存音频**（PCM 只在管道里过一遍，不落盘）。
+
+**前提**
+
+1. `ffmpeg` 在 PATH 里；不在就设 `DSH_BILI_LIVE_FFMPEG` 指向可执行文件。
+2. 装转写引擎（选一个）：
+   - **faster-whisper**（CPU）：`pip install faster-whisper` 到插件用的那个 venv；装在别的 venv 就用 `DSH_BILI_LIVE_ASR_PYTHON` 指过去。
+   - **whisper.cpp**（能吃 AMD 显卡的 Vulkan 版）：装好后设 `DSH_BILI_LIVE_WHISPERCPP` 指向 `whisper-cli.exe`，再放一个模型文件（`ggml-*.bin`），设 `DSH_BILI_LIVE_WHISPERCPP_MODEL`。
+3. 转写不必用插件自己的 Python：配置里的 `audio.asrPython`（设置页「转写解释器」那个输入框）可以指向另一个已经装好 faster-whisper 的解释器。为了不让网页随手把本机任意程序设成解释器，这里只接受 `$DSH_HOME` 之下的路径；别处的会被 403 拒掉，要改就直接改配置文件。
+
+**GPU**
+
+- faster-whisper 走 CTranslate2，只认 **CUDA**。AMD 卡开 `cuda` 一定失败 —— 插件会把**原始报错原样显示**在设置页，然后自动退回 CPU，不会假装成功。AMD 卡上常见原文是 `RuntimeError: CUDA failed with error CUDA driver version is insufficient for CUDA runtime version`（其实是根本没有可用的 CUDA 设备）。
+- 想在 AMD 卡上用，只有 whisper.cpp 的 Vulkan 版（本仓库不代编译，需要自己装 VS Build Tools + Vulkan SDK）。
+- 设置页有「转写自检」按钮，就是真去点一次 CUDA 拿报错；慢，但能确认到底行不行。
+
+**怎么开**
+
+设置页「听声音」→ 填已放行的房间 → 选模型（tiny/base/small/medium）和设备（GPU 优先 / 只用 CPU / 强要 CUDA）→「开始听」。
+模型也可以直接调工具：
+
+| 工具 | 作用 |
+| --- | --- |
+| `bili_live_audio_start` | 开听觉（房间必须已放行） |
+| `bili_live_audio_stop` | 关掉（留空=全部房间） |
+| `bili_live_audio_status` | 谁在听、哪个引擎/设备、GPU 有没有失败、最近听到什么 |
+| `bili_live_transcript` | 读最近几条转录（带时间戳） |
+| `bili_live_asr_probe` | 体检：能不能用 GPU、whisper.cpp / DirectML 在不在 |
+
+**代价**
+
+- CPU 转写吃资源：`small` 模型在普通台式机上大约是「十几秒一段、延迟十几到几十秒」。想更快就降模型或加大 `window`。
+- 转写一定有错字，自动陪聊的提示里已经写明「这是语音转写、可能有错，别当画面描述」。
+- 文本会随自动陪聊的 prompt 交给你选的那个模型供应商。不想要就只开转写、不开自动陪聊。
 ## 给模型的工具
 
 | 工具 | 作用 |
@@ -99,6 +137,9 @@ dsh plugin --profile desktop add dsh-bili-live
 | `bili_live_log` | 最近的发送日志（含草稿/被拦/失败） |
 | `bili_live_watching` | 我此刻在看的房间（放行名单 + 开播状态 + 最近说过什么） |
 | `bili_live_doctor` | 环境自检（Python / 依赖 / 凭证路径） |
+| `bili_live_audio_start` / `audio_stop` / `audio_status` | 听声音（语音转写）的开关与状态 |
+| `bili_live_transcript` | 读最近的语音转写（带时间戳） |
+| `bili_live_asr_probe` | 转写体检：GPU 能不能用、whisper.cpp / DirectML 在不在 |
 
 ## 配置
 
@@ -115,13 +156,15 @@ dsh plugin --profile desktop add dsh-bili-live
     "persona": "你是直播间里的一个普通观众，说话短、口语、不客套。",
     "tickSec": 20, "windowSec": 150,
     "minLines": 2, "minGapSec": 240, "perHour": 8, "maxChars": 60
-  }
+  },
+  "audio": { "model": "small", "device": "auto", "window": 15, "overlap": 2, "keep": 300 }
 }
 ```
 
 - `sendEnabled`：发弹幕总开关。默认 `false`（先看后发）。
 - `botName`：它在房里的名字，用来判断「有人点名」。
 - `autoChat.minGapSec` / `perHour` / `maxChars`：两次开口的间隔、每小时上限、单句字数上限。
+- `audio.device`：`auto`（先试 GPU，失败退 CPU）/ `cpu` / `cuda`；`window` 每段秒数；`overlap` 相邻段重叠；`keep` 转录文本保留秒数。
 
 ## 安全：设置页那几个接口怎么守的（v0.3.0）
 
@@ -149,9 +192,10 @@ logs/danmaku.jsonl       每次发送（含草稿/被拦/失败）
 logs/plugin.log          插件自己的日志
 ```
 
-## 限制（v0.2 有意不做）
+## 限制（有意不做）
 
-- **不看画面、不听声音**：不拉流、不做语音转写、不做视觉理解。
+- **不看画面**：不抽帧、不做视觉理解。
+- **听声音是可选的**（v0.4）：要自己装 ffmpeg + 一个转写引擎；不装也能正常用弹幕那一套。
 - **不自动进房**：名单必须人来放行；没放行的房间连只读的 info/feed 都会被拒。
 - **弹幕发出去收不回**：60 秒冷却 + 每小时上限只能减少手滑，不能撤销。
 - **不做开机自启 / 计划任务**：worker 由插件进程拉起，插件停它就停。

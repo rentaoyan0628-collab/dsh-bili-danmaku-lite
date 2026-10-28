@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = useState('')
       const [draft, setDraft] = useState({ room_id: '', text: '' })
       const [watchForm, setWatchForm] = useState({ room_id: '', webhook: '' })
+      const [audioForm, setAudioForm] = useState({ room_id: '', model: '', device: '', asrPython: '' })
       const [reqRoom, setReqRoom] = useState('')
       const [cfg, setCfg] = useState(null)
 
@@ -215,6 +216,106 @@ window.__ModuleLoader__.load({
             }, '开始挂机'),
           ),
         ),
+
+        // ── 听声音（v0.4.0：只转文字，不发弹幕）
+        (() => {
+          const AU = (cfg && cfg.audio) || { model: 'small', device: 'auto', window: 15, overlap: 2, keep: 300, asrPython: '' }
+          const list = st.audio || []
+          const live = list.filter((a) => a.alive)
+          const one = live[0] || list[0] || null
+          const form = { room_id: audioForm.room_id, model: audioForm.model || AU.model, device: audioForm.device || AU.device, asrPython: audioForm.asrPython }
+          return h('div', { className: 'bl-card' },
+            h('div', { className: 'bl-h' }, '听声音（语音转写）',
+              live.length ? h(Tag, { ok: true }, '在听 ' + live.length + ' 个房间') : h(Tag, { ok: false }, '没在听'),
+              h('span', { className: 'bl-mut' }, '只转文字，不发任何弹幕'),
+            ),
+            h('div', { className: 'bl-mut' },
+              '后台拉流 → 每 ' + AU.window + ' 秒一段 → 语音识别。先试 GPU（AMD 卡会失败，原始报错会显示出来），不行自动退 CPU。'
+              + '文本只留最近 ' + AU.keep + ' 秒，自动陪聊可以引用它。'),
+            h('div', { className: 'bl-list' },
+              list.length === 0
+                ? h('div', { className: 'bl-mut' }, '（没有房间在听）')
+                : list.map((a) => h('div', { className: 'bl-item', key: a.room_id },
+                  h('span', null,
+                    '房间 ' + a.room_id
+                    + '　' + (a.alive ? '在跑' : '已停')
+                    + '　' + (a.engine || '?') + ' / ' + (a.device || '?')
+                    + '　已转 ' + a.segments + ' 段 / ' + a.chars + ' 字'
+                    + (a.last_ok_at ? '　最近 ' + a.last_ok_at : '')),
+                  h('button', {
+                    className: 'bl-btn bl-danger',
+                    disabled: busy !== '',
+                    onClick: () => act('audio', { action: 'stop', room_id: a.room_id }, '关听觉'),
+                  }, '停'),
+                )),
+            ),
+            list.filter((a) => a.device_error).map((a) => h('div', { key: 'ge' + a.room_id, className: 'bl-mut' },
+              'GPU 没成功（' + a.room_id + '），已退回 CPU：' + a.device_error)),
+            h('div', { className: 'bl-sep' }),
+            h(Field, { label: '房间' },
+              h('input', { className: 'bl-in', placeholder: '房间号 / 昵称 / UID', value: form.room_id, onChange: (e) => setAudioForm({ ...form, room_id: e.target.value }) }),
+              h('select', {
+                className: 'bl-sel',
+                value: form.model,
+                onChange: (e) => setAudioForm({ ...form, model: e.target.value }),
+              },
+                ['tiny', 'base', 'small', 'medium'].map((m) => h('option', { key: m, value: m }, m)),
+              ),
+              h('select', {
+                className: 'bl-sel',
+                value: form.device,
+                onChange: (e) => setAudioForm({ ...form, device: e.target.value }),
+              },
+                h('option', { value: 'auto' }, 'GPU 优先（失败退 CPU）'),
+                h('option', { value: 'cpu' }, '只用 CPU'),
+                h('option', { value: 'cuda' }, '强要 CUDA'),
+              ),
+              h('button', {
+                className: 'bl-btn bl-primary',
+                disabled: busy !== '' || !form.room_id.trim(),
+                onClick: () => act('audio', {
+                  action: 'start',
+                  room_id: form.room_id.trim(),
+                  model: form.model,
+                  device: form.device,
+                  ...(form.asrPython !== '' ? { asrPython: form.asrPython.trim() } : {}),
+                }, '开听觉'),
+              }, '开始听'),
+            ),
+            h(Field, { label: '转写解释器（可留空）' },
+              h('input', {
+                className: 'bl-in',
+                placeholder: '留空 = 插件自己的 Python；要 GPU/别的 venv 才填，只接受 .dsh 下的路径',
+                value: form.asrPython,
+                onChange: (e) => setAudioForm({ ...form, asrPython: e.target.value }),
+              }),
+              h('span', { className: 'bl-mut' }, '现在生效的是：' + (AU.asrPython || '（跟插件一样）')),
+            ),
+            h('div', { className: 'bl-row' },
+              h('button', {
+                className: 'bl-btn',
+                disabled: busy !== '',
+                onClick: async () => {
+                  setBusy('asr')
+                  const r = await api('asr')
+                  const p = (r && r.probe) || {}
+                  if (!r.ok) setMsg(r.error || '自检失败')
+                  else {
+                    const bits = ['推荐 ' + (p.recommend || '?')]
+                    if (p.gpu && p.gpu.error) bits.push('GPU 报错：' + p.gpu.error)
+                    if (p.advice) bits.push(p.advice)
+                    setMsg('转写自检：' + bits.join('；'))
+                  }
+                  setBusy('')
+                },
+              }, '转写自检'),
+              h('span', { className: 'bl-mut' }, '会真去点一次 GPU，慢（几十秒），用来确认到底能不能用显卡'),
+            ),
+            one && one.recent && one.recent.length
+              ? h('pre', { className: 'bl-pre' }, one.recent.map((r) => (r.ts || '') + '  ' + (r.text || '')).join('\n'))
+              : null,
+          )
+        })(),
 
         // ── 手动发一条
         h('div', { className: 'bl-card' },

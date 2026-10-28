@@ -1,3 +1,8 @@
 # dsh-bili-live 的 Python 依赖（装进插件自己的 venv，别装进系统 Python）
 bilibili-api-python>=17.0.0
 mcp>=1.2.0
+
+# 可选：听声音（v0.4）才需要。体积大（会带 ctranslate2 / onnxruntime / tokenizers），
+# 不想装就不装，弹幕那一套不受影响。
+# 想要就取消注释，或者单独 pip install faster-whisper。
+# faster-whisper>=1.1.0

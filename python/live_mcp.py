@@ -1132,6 +1132,245 @@ async def bili_live_watch_stop(room_id: Union[int, str] = "") -> str:
     return json.dumps({"ok": True, "stopped": out}, ensure_ascii=False, indent=2)
 
 
+# ───────────────────────────── 听声音（v0.4.0）─────────────────────────────
+#
+# 只做耳朵，不做眼睛。链路：live_audio.py（独立 worker）→ ffmpeg 拉流 → 切窗 → 语音识别
+# → live-chat/<房间>/audio.jsonl。这个 MCP 只负责 起 / 停 / 看状态 / 读转录，
+# 不自己转写，免得一次识别把 MCP 挡住。
+
+AUDIO_SCRIPT = Path(os.environ.get("DSH_BILI_LIVE_AUDIO") or (HOME / "live_audio.py")).expanduser()
+AUDIO_PROBE = Path(os.environ.get("DSH_BILI_LIVE_AUDIO_PROBE") or (HOME / "asr_probe.py")).expanduser()
+
+
+def _audio_snapshot(d: Path) -> dict:
+    meta = _read_json(d / "audio.json")
+    pid = int(meta.get("pid") or 0)
+    tail = []
+    for line in _tail_lines(d / "audio.jsonl", 5):
+        try:
+            tail.append(json.loads(line))
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "room_id": meta.get("room") or d.name,
+        "pid": pid,
+        "alive": _pid_alive(pid),
+        "state": meta.get("state") or ("unknown" if not meta else "stopped"),
+        "engine": meta.get("engine") or "",
+        "device": meta.get("device") or "",
+        "requested_device": meta.get("requested_device") or "",
+        "model": meta.get("model") or "",
+        "window": meta.get("window"),
+        "overlap": meta.get("overlap"),
+        "started_at": meta.get("started_at"),
+        "last_ok_at": meta.get("last_ok_at"),
+        "last_error": meta.get("last_error") or "",
+        "device_error": meta.get("device_error") or "",
+        "fallback": bool(meta.get("fallback")),
+        "segments": int(meta.get("segments") or 0),
+        "chars": int(meta.get("chars") or 0),
+        "kept_lines": int(meta.get("kept_lines") or 0),
+        "recent": tail,
+        "last_log": _tail_lines(d / "audio.log", 3),
+    }
+
+
+def _audio_rooms() -> list:
+    if not WATCH_ROOT.exists():
+        return []
+    return [p for p in sorted(WATCH_ROOT.iterdir()) if p.is_dir() and (p / "audio.json").exists()]
+
+
+@mcp.tool()
+async def bili_live_audio_start(
+    room_id: Union[int, str] = DEFAULT_ROOM,
+    model: str = "small",
+    device: str = "auto",
+    window: float = 15.0,
+    overlap: float = 2.0,
+    keep: float = 300.0,
+    engine: str = "auto",
+) -> str:
+    """给一个已放行的直播间装上「耳朵」：后台把直播声音转成带时间戳的文字。
+
+    只转写，不发任何弹幕。文本写到 live-chat/<房间>/audio.jsonl，只保留最近 keep 秒。
+    和 bili_live_watch_start（听弹幕）是两条独立的路，可以同时开。
+
+    Args:
+        room_id: 房间号 / UP主昵称 / UID
+        model: 识别模型（tiny / base / small / medium），越大越准也越慢
+        device: auto=先试 GPU、失败自动退 CPU；cpu=只用 CPU；cuda=强要 GPU（AMD 卡会失败，原始报错会返回）
+        window: 每段音频秒数（默认 15，越小延迟越低、越吃 CPU）
+        overlap: 相邻段重叠秒数（默认 2，避免一句话被切断）
+        keep: 转录文本保留秒数（默认 300）
+        engine: auto / faster / whispercpp（whisper.cpp 的 Vulkan 版能吃到 AMD 显卡）
+    """
+    from datetime import datetime
+
+    try:
+        rid = await _resolve_room(room_id)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": "找不到这个直播间：" + type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+    denied = await _allow_check(rid)
+    if denied:
+        return json.dumps({"ok": False, "status": "not_allowed", "room_id": rid, "error": denied}, ensure_ascii=False)
+    if not AUDIO_SCRIPT.is_file():
+        return json.dumps({"ok": False, "error": "找不到转写脚本：" + str(AUDIO_SCRIPT)}, ensure_ascii=False)
+    d = _watch_dir(rid)
+    d.mkdir(parents=True, exist_ok=True)
+    old = _read_json(d / "audio.json")
+    if _pid_alive(int(old.get("pid") or 0)):
+        return json.dumps(
+            {"ok": True, "status": "already_running", "room_id": rid, "audio": _audio_snapshot(d),
+             "message": "房间 " + str(rid) + " 已经在听了（pid " + str(old.get("pid")) + "）"},
+            ensure_ascii=False, indent=2)
+    try:
+        (d / "stop.flag").unlink()
+    except FileNotFoundError:
+        pass
+    # 转写引擎（faster-whisper）可能装在另一个 venv 里：DSH_BILI_LIVE_ASR_PYTHON 指过去即可
+    audio_python = os.environ.get("DSH_BILI_LIVE_ASR_PYTHON") or sys.executable
+    cmd = [
+        audio_python,
+        str(AUDIO_SCRIPT),
+        "--room", str(rid),
+        "--dir", str(d),
+        "--window", str(float(window)),
+        "--overlap", str(float(overlap)),
+        "--keep", str(float(keep)),
+        "--model", str(model or "small"),
+        "--device", str(device or "auto"),
+        "--engine", str(engine or "auto"),
+    ]
+    with open(d / "audio.out.log", "a", encoding="utf-8") as out:
+        proc = subprocess.Popen(  # noqa: S603
+            cmd,
+            cwd=str(HOME),
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            creationflags=0x08000000,
+            close_fds=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+        )
+    await asyncio.sleep(3)
+    snap = _audio_snapshot(d)
+    if not snap.get("pid"):
+        (d / "audio.json").write_text(
+            json.dumps({"pid": proc.pid, "room": rid, "state": "starting",
+                        "started_at": datetime.now().astimezone().isoformat(timespec="seconds")},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        snap = _audio_snapshot(d)
+    alive = bool(snap.get("alive"))
+    msg = "房间 " + str(rid) + " 开始听声音：引擎 " + (snap.get("engine") or "准备中") + "，设备 " + (snap.get("device") or "?") + "，每 " + str(int(window)) + " 秒一段"
+    if snap.get("device_error"):
+        msg += "。GPU 没成功，已退回 CPU，原始报错：" + str(snap.get("device_error"))
+    if not alive:
+        msg = "worker 起了但马上就退了，看 audio.log：" + (" | ".join(snap.get("last_log") or []))[:400]
+    return json.dumps({"ok": alive, "status": "started" if alive else "exited", "message": msg, "audio": snap}, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def bili_live_audio_stop(room_id: Union[int, str] = "") -> str:
+    """关掉某个房间（留空=全部房间）的语音转写。只停转写，不影响弹幕监听。"""
+    if str(room_id or "").strip():
+        try:
+            rid = await _resolve_room(room_id)
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"ok": False, "error": "找不到这个直播间：" + type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+        dirs = [_watch_dir(rid)]
+    else:
+        dirs = _audio_rooms()
+    out = []
+    for d in dirs:
+        meta = _read_json(d / "audio.json")
+        pid = int(meta.get("pid") or 0)
+        if not _pid_alive(pid):
+            out.append({"room_id": meta.get("room") or d.name, "changed": False, "message": "本来就没在听"})
+            continue
+        try:
+            (d / "stop.flag").write_text("stop", encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            out.append({"room_id": d.name, "changed": False, "error": "写 stop.flag 失败：" + str(exc)})
+            continue
+        waited = 0.0
+        while waited < 20.0 and _pid_alive(pid):
+            await asyncio.sleep(1.0)
+            waited += 1.0
+        killed = False
+        if _pid_alive(pid):
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=15)
+                killed = True
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            (d / "stop.flag").unlink()
+        except Exception:  # noqa: BLE001
+            pass
+        out.append({"room_id": meta.get("room") or d.name, "pid": pid, "changed": True,
+                    "graceful": not killed, "message": "已收工" if not killed else "20 秒没退，已强杀"})
+    return json.dumps({"ok": True, "stopped": out}, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def bili_live_audio_status(room_id: Union[int, str] = "") -> str:
+    """看语音转写状态：谁在听、哪个引擎/设备、GPU 有没有失败、最近听到什么。只读。"""
+    if str(room_id or "").strip():
+        try:
+            rid = await _resolve_room(room_id)
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"ok": False, "error": "找不到这个直播间：" + type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+        return json.dumps({"ok": True, "audio": _audio_snapshot(_watch_dir(rid))}, ensure_ascii=False, indent=2)
+    return json.dumps({"ok": True, "items": [_audio_snapshot(p) for p in _audio_rooms()]}, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def bili_live_transcript(room_id: Union[int, str] = DEFAULT_ROOM, last: int = 20) -> str:
+    """读某个房间最近的语音转写（带时间戳）。只读；只保留最近 keep 秒（默认 5 分钟）。
+
+    Args:
+        room_id: 房间号 / UP主昵称 / UID
+        last: 最近几条（默认 20，最多 200）
+    """
+    try:
+        rid = await _resolve_room(room_id)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": "找不到这个直播间：" + type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+    d = _watch_dir(rid)
+    n = max(1, min(int(last or 20), 200))
+    recs = []
+    for line in _tail_lines(d / "audio.jsonl", n):
+        try:
+            recs.append(json.loads(line))
+        except Exception:  # noqa: BLE001
+            pass
+    return json.dumps({"ok": True, "room_id": rid, "count": len(recs), "lines": recs}, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def bili_live_asr_probe() -> str:
+    """体检这台机器能不能用 GPU 转写：真去点一次 CUDA 拿原始报错，再看 whisper.cpp 与 DirectML。只读。"""
+    if not AUDIO_PROBE.is_file():
+        return json.dumps({"ok": False, "error": "找不到探测脚本：" + str(AUDIO_PROBE)}, ensure_ascii=False)
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [sys.executable, str(AUDIO_PROBE)],
+            capture_output=True,
+            timeout=180,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+        )
+        text = (proc.stdout or b"").decode("utf-8", "replace")
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+        try:
+            data = json.loads(text)
+        except Exception:  # noqa: BLE001
+            return json.dumps({"ok": False, "error": "探测脚本没输出 JSON", "stdout": text[-800:], "stderr": err[-800:]}, ensure_ascii=False)
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+
+
 def main() -> None:
     mcp.run()
 

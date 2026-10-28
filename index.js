@@ -2,7 +2,7 @@
  * dsh-bili-live —— host 半端（B站直播间：看弹幕 / 发弹幕 / 挂着听 / 自动陪聊）
  * ============================================================================
  * 为什么要它：原先这套东西长在 qq-bridge 里 —— 换台机器、或者不想装 QQ 桥接的人
- * 就只能看着 skill 干瞪眼。这里把「能力」抽出来做成独立插件（v0.2，不含音视频）：
+ * 就只能看着 skill 干瞪眼。这里把「能力」抽出来做成独立插件（v0.2 弹幕；v0.4 加可选「听声音」转写）：
  *
  *   1. 插件自己用 spawn 起那份 Python MCP（python/live_mcp.py），把它的能力注册成
  *      DSH 工具（info / feed / send / request / watch_* / log / watching）。
@@ -75,6 +75,8 @@ const DEFAULTS = {
     perHour: 8,
     maxChars: 60,
   },
+  // 听声音（v0.4.0）：只转写，不发弹幕。device=auto 时先试 GPU，失败自动退 CPU。
+  audio: { model: 'small', device: 'auto', window: 15, overlap: 2, keep: 300, asrPython: '' },
 }
 
 /* ────────────────────────── 小工具 ────────────────────────── */
@@ -128,6 +130,8 @@ function normalizeCfg(raw) {
   const r = (raw && typeof raw === 'object') ? raw : {}
   const ac = (r.autoChat && typeof r.autoChat === 'object') ? r.autoChat : {}
   const d = DEFAULTS.autoChat
+  const au = (r.audio && typeof r.audio === 'object') ? r.audio : {}
+  const da = DEFAULTS.audio
   return {
     pythonPath: String(r.pythonPath || '').trim(),
     botName: String(r.botName || DEFAULTS.botName).trim().slice(0, 20) || DEFAULTS.botName,
@@ -144,6 +148,15 @@ function normalizeCfg(raw) {
       perHour: clamp(Math.round(Number(ac.perHour) || d.perHour), 1, 60),
       maxChars: clamp(Math.round(Number(ac.maxChars) || d.maxChars), 10, 40),
     },
+    audio: {
+      model: String(au.model || da.model).trim().slice(0, 20) || da.model,
+      device: ['auto', 'cpu', 'cuda'].includes(String(au.device)) ? String(au.device) : da.device,
+      window: clamp(Math.round(Number(au.window) || da.window), 5, 60),
+      overlap: clamp(Number(au.overlap) ?? da.overlap, 0, 10),
+      keep: clamp(Math.round(Number(au.keep) || da.keep), 60, 1800),
+      // 听觉 worker 用哪个解释器（要装 faster-whisper 的那个 venv）。空=跟插件自己的 Python 一样。
+      asrPython: String(au.asrPython || '').trim().slice(0, 300),
+    },
   }
 }
 
@@ -152,7 +165,12 @@ function loadCfg() {
 }
 
 function persistCfg(patch) {
-  const next = normalizeCfg({ ...cfg, ...(patch || {}), autoChat: { ...cfg.autoChat, ...((patch && patch.autoChat) || {}) } })
+  const next = normalizeCfg({
+    ...cfg,
+    ...(patch || {}),
+    autoChat: { ...cfg.autoChat, ...((patch && patch.autoChat) || {}) },
+    audio: { ...cfg.audio, ...((patch && patch.audio) || {}) },
+  })
   cfg = next
   writeJson(CONFIG_FILE, next)
   return next
@@ -197,11 +215,35 @@ function pythonPathAllowed(next) {
   }
 }
 
+/**
+ * 听觉 worker 的解释器（cfg.audio.asrPython）也走网页端，所以同样要设闸：
+ * 只允许 $DSH_HOME 下的路径、必须是存在的文件、文件名得像 python。
+ * 允许 .dsh 下面别的 venv，是为了复用已经装好 faster-whisper 的环境。
+ */
+function asrPythonAllowed(next) {
+  const p = String(next || '').trim()
+  if (!p) return { ok: true }
+  const abs = (() => { try { return resolve(p) } catch { return p } })()
+  if (!/^python(3(\.\d+)?)?(\.exe)?$/i.test(basename(abs))) {
+    return { ok: false, error: '这个解释器文件名不像 python：' + basename(abs) }
+  }
+  if (!existsSync(abs)) return { ok: false, error: '这个解释器不存在：' + abs }
+  const root = resolve(DSH_HOME)
+  if (!(abs === root || abs.startsWith(root + sep))) {
+    return { ok: false, error: '听觉解释器只接受 ' + root + ' 之下的路径（比如别处已经装好 faster-whisper 的 venv）' }
+  }
+  return { ok: true }
+}
+
 function pythonEnv() {
   return {
     ...process.env,
     DSH_BILI_LIVE_HOME: HOME,
     DSH_BILI_LIVE_WORKER: WORKER_SCRIPT,
+    DSH_BILI_LIVE_AUDIO: join(PY_DIR, 'live_audio.py'),
+    DSH_BILI_LIVE_AUDIO_PROBE: join(PY_DIR, 'asr_probe.py'),
+    // 空串会被 python 侧当成没设，回落到插件自己的解释器
+    DSH_BILI_LIVE_ASR_PYTHON: cfg.audio.asrPython || '',
     DSH_BILI_LIVE_NAME: cfg.botName,
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8',
@@ -444,6 +486,55 @@ function freshWithin(recs, windowSec) {
   return out
 }
 
+/* ────────────────────── 听声音（v0.4.0，只转写不发弹幕）────────────────────── */
+
+/** 某个房间的听觉状态：只读 worker 落的 audio.json / audio.jsonl，不起任何进程 */
+function audioSnapshot(room) {
+  const dir = join(WATCH_ROOT, String(room))
+  const meta = readJson(join(dir, 'audio.json'), {})
+  const keys = Object.keys(meta || {}).length
+  const pid = Number(meta.pid) || 0
+  const recent = tailFile(join(dir, 'audio.jsonl'), 5)
+    .map((line) => { try { return JSON.parse(line) } catch { return null } })
+  return {
+    room_id: String(meta.room || room),
+    pid,
+    alive: pidAlive(pid),
+    state: String(meta.state || (keys ? 'stopped' : 'idle')),
+    engine: String(meta.engine || ''),
+    device: String(meta.device || ''),
+    model: String(meta.model || ''),
+    window: Number(meta.window) || 0,
+    started_at: meta.started_at || '',
+    last_ok_at: meta.last_ok_at || '',
+    device_error: String(meta.device_error || ''),
+    last_error: String(meta.last_error || ''),
+    segments: Number(meta.segments) || 0,
+    chars: Number(meta.chars) || 0,
+    recent: recent.filter(Boolean),
+  }
+}
+
+function audioList() {
+  try {
+    if (!existsSync(WATCH_ROOT)) return []
+    return readdirSync(WATCH_ROOT, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(join(WATCH_ROOT, e.name, 'audio.json')))
+      .map((e) => audioSnapshot(e.name))
+  } catch { return [] }
+}
+
+/** 最近这段直播里都在说什么（语音转写，可能带错字）。给自动陪聊当上下文 */
+function freshTranscript(room, windowSec, limit = 10) {
+  const dir = join(WATCH_ROOT, String(room))
+  const lines = tailFile(join(dir, 'audio.jsonl'), 60)
+  const recs = []
+  for (const line of lines) {
+    try { recs.push(JSON.parse(line)) } catch { /* 半行 */ }
+  }
+  return freshWithin(recs, windowSec).slice(-limit)
+}
+
 const AUTO_SYS = [
   '你在一个 B站 直播间的弹幕里，是个普通观众，不是主播、不是助理。',
   '你要决定：这一刻要不要接一句话；要接就说一句短的（不超过 {max} 个字），不接就只回 SKIP。',
@@ -452,6 +543,7 @@ const AUTO_SYS = [
   '2) 只有真的有你插一句会更有意思、或者有人在问一个能一句话答的问题时才开口。',
   '3) 不复读、不总结、不当客服、不说「作为AI」、不要表情包、不要 @ 谁。',
   '4) 同一件事别连着说；上一条你自己刚说过就先沉默。',
+  '5) 消息里可能附了「直播里正在说的」——那是语音转写，有错字、会漏句。可以顺着它的话接，但别当成画面描述，别编你没听到的内容。',
   '只输出一行：要么是那句弹幕，要么正好是 SKIP。',
 ].join('\n')
 
@@ -507,18 +599,22 @@ async function autoTick(llm) {
     const room = String(w.room_id)
     const dir = join(WATCH_ROOT, room)
     const recs = freshWithin(readFreshDanmaku(room, dir), A.windowSec)
-    if (!recs.length) continue
+    // v0.4.0：只有画面里在说话、没人发弹幕时也可以接一句
+    const heard = freshTranscript(room, A.windowSec, 10)
+    if (!recs.length && !heard.length) continue
     const atMe = recs.filter((r) => r.at_me)
-    if (!atMe.length && recs.length < A.minLines) continue
+    if (!atMe.length && recs.length < A.minLines && !heard.length) continue
     const st = autoRoomState(room)
     const now = Date.now()
     if (now - st.lastReplyAt < A.minGapSec * 1000) continue
     st.times = st.times.filter((t) => now - t < 3600 * 1000)
     if (st.times.length >= A.perHour) continue
     const lines = recs.slice(-12).map((r) => (r.uname ? r.uname + '：' : '') + String(r.text || '').slice(0, 100))
+    const heardLines = heard.map((r) => '（直播里）' + String(r.text || '').slice(0, 120))
     const sys = AUTO_SYS.split('{max}').join(String(A.maxChars))
     const user = (A.persona ? '你在这间房的人设：' + A.persona + '\n\n' : '')
-      + '最近这一小段弹幕（时间从旧到新）：\n' + lines.join('\n')
+      + '最近这一小段弹幕（时间从旧到新）：\n' + (lines.length ? lines.join('\n') : '（这段时间没人发弹幕）')
+      + (heardLines.length ? '\n\n直播里正在说的（语音转写，可能有错字）：\n' + heardLines.join('\n') : '')
       + '\n\n要不要接一句？只回那一句，或者 SKIP。'
     const r = await askLlm(llm, sys, user)
     if (!r.ok) { autoState.lastError = r.error; log('自动陪聊跳过：' + r.error); continue }
@@ -703,6 +799,76 @@ function registerTools() {
   })
 
   tool({
+    name: 'bili_live_audio_start',
+    description: '给放行过的直播间装上「耳朵」：后台把直播声音转成带时间戳的文字（只转写，不发弹幕）。'
+      + 'device=auto 先试 GPU，AMD 卡会失败并自动退回 CPU，原始报错会一起返回。',
+    parameters: {
+      room_id: { type: 'string', description: '直播间号 / UP主昵称 / UID' },
+      model: { type: 'string', description: '识别模型 tiny/base/small/medium，默认 small' },
+      device: { type: 'string', description: 'auto（默认）/ cpu / cuda' },
+      window: { type: 'number', description: '每段音频秒数，默认 15' },
+      overlap: { type: 'number', description: '相邻段重叠秒数，默认 2' },
+      keep: { type: 'number', description: '转录文本保留秒数，默认 300' },
+    },
+    async execute(args) {
+      const a = cfg.audio
+      return jsonish(await call('bili_live_audio_start', {
+        room_id: String(args.room_id ?? ''),
+        model: String(args.model ?? a.model),
+        device: String(args.device ?? a.device),
+        window: clamp(Number(args.window) || a.window, 5, 60),
+        overlap: clamp(Number(args.overlap) ?? a.overlap, 0, 10),
+        keep: clamp(Number(args.keep) || a.keep, 60, 1800),
+      }, { timeoutMs: 60000 }))
+    },
+  })
+
+  tool({
+    name: 'bili_live_audio_stop',
+    description: '关掉语音转写（留空=全部房间）。只停耳朵，不影响弹幕监听。',
+    parameters: { room_id: { type: 'string', description: '留空=全部' } },
+    async execute(args) {
+      return jsonish(await call('bili_live_audio_stop', { room_id: String(args.room_id ?? '') }, { timeoutMs: 60000 }))
+    },
+  })
+
+  tool({
+    name: 'bili_live_audio_status',
+    description: '看语音转写状态：谁在听、用的哪个引擎/设备、GPU 有没有失败、最近听到什么。只读。',
+    parameters: { room_id: { type: 'string', description: '留空=看全部' } },
+    async execute(args) {
+      const rid = String(args.room_id ?? '')
+      if (!rid.trim()) return { ok: true, items: audioList() }
+      const hit = audioList().find((x) => x.room_id === rid)
+      return hit ? { ok: true, audio: hit } : { ok: false, error: '这个房间没在听：' + rid }
+    },
+  })
+
+  tool({
+    name: 'bili_live_transcript',
+    description: '读直播间最近的语音转写（带时间戳，只保留最近几分钟）。只读。',
+    parameters: {
+      room_id: { type: 'string', description: '直播间号 / UP主昵称 / UID' },
+      last: { type: 'number', description: '最近几条，默认 20，最多 200' },
+    },
+    async execute(args) {
+      return jsonish(await call('bili_live_transcript', {
+        room_id: String(args.room_id ?? ''),
+        last: clamp(Number(args.last) || 20, 1, 200),
+      }))
+    },
+  })
+
+  tool({
+    name: 'bili_live_asr_probe',
+    description: '体检这台机器能不能用 GPU 转写：真点一次 CUDA 拿原始报错，再看 whisper.cpp / DirectML。只读。',
+    parameters: {},
+    async execute() {
+      return jsonish(await call('bili_live_asr_probe', {}, { timeoutMs: 200000 }))
+    },
+  })
+
+  tool({
     name: 'bili_live_doctor',
     description: '环境自检：找 Python、查 bilibili_api / mcp 装没装、看凭证和放行名单在哪。只读，不改任何东西。',
     parameters: {},
@@ -871,8 +1037,65 @@ function registerRoutes(ctx) {
         watching: watchingList(),
         send: sendStats(),
         auto: { ...cfg.autoChat, lastError: autoState.lastError, busy: autoState.busy },
+        audio: audioList(),
+        audioCfg: cfg.audio,
         log_tail: tailFile(PLUGIN_LOG, 25),
       })
+    } catch (e) {
+      return sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
+    }
+  })
+
+  // 转写体检：真去点一次 CUDA，把原始报错原样返回给设置页（慢，最多 3 分钟）
+  route('/dsh-bili-live/asr', async (req, res) => {
+    try {
+      const r = jsonish(await call('bili_live_asr_probe', {}, { timeoutMs: 200000 }))
+      return sendJson(res, 200, { ok: true, probe: r })
+    } catch (e) {
+      return sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
+    }
+  })
+
+  route('/dsh-bili-live/audio', async (req, res) => {
+    try {
+      if (req.method === 'POST') {
+        const body = await readBody(req)
+        const action = String(body.action || '')
+        const room = String(body.room_id || '')
+        if (action === 'start') {
+          if (!room.trim()) return sendJson(res, 400, { ok: false, error: '要给房间号' })
+          if (body.asrPython !== undefined) {
+            const pass = asrPythonAllowed(body.asrPython)
+            if (!pass.ok) return sendJson(res, 403, { ok: false, error: pass.error, config: cfg.audio })
+          }
+          if (body.model || body.device || body.asrPython !== undefined) {
+            persistCfg({
+              audio: {
+                ...(body.model ? { model: body.model } : {}),
+                ...(body.device ? { device: body.device } : {}),
+                ...(body.asrPython !== undefined ? { asrPython: body.asrPython } : {}),
+              },
+            })
+          }
+          const r = jsonish(await call('bili_live_audio_start', {
+            room_id: room,
+            model: cfg.audio.model,
+            device: cfg.audio.device,
+            window: cfg.audio.window,
+            overlap: cfg.audio.overlap,
+            keep: cfg.audio.keep,
+          }, { timeoutMs: 60000 }))
+          log('设置页：开听觉 ' + room + ' → ' + String(r?.status || r?.ok))
+          return sendJson(res, r?.ok ? 200 : 400, { ...r, items: audioList() })
+        }
+        if (action === 'stop') {
+          const r = jsonish(await call('bili_live_audio_stop', { room_id: room }, { timeoutMs: 60000 }))
+          log('设置页：关听觉 ' + (room || '全部'))
+          return sendJson(res, 200, { ...r, items: audioList() })
+        }
+        return sendJson(res, 400, { ok: false, error: 'action 只能是 start / stop' })
+      }
+      return sendJson(res, 200, { ok: true, items: audioList(), config: cfg.audio })
     } catch (e) {
       return sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
     }
