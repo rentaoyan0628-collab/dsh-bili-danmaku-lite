@@ -8,7 +8,7 @@
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）用的 **B站直播间插件**：看弹幕、发弹幕、挂着听、可选自动陪聊。
 
-> **v0.4 范围**：弹幕 + 配置 + **可选「听声音」**（把直播里的说话转成文字，给自动陪聊当上下文）。
+> **v0.4.2 范围**：弹幕 + 配置 + **可选「听声音」**（把直播里的说话转成文字，给自动陪聊当上下文），外加 v0.4.0 / v0.4.1 两轮安全修复（认证服务不可用时拒绝对敏感接口放行、解释器只认固定 venv 或本机已配的那个、挂机 webhook 只允许用户预先放行的地址）。
 > **不看画面**：不抽帧、不做视觉理解。
 > 所有「进入某房间」「发弹幕」的动作都在**人**手里 —— 模型只能申请，放行在设置页里点。
 
@@ -20,7 +20,7 @@
 | 监听实时弹幕若干秒 | 模型 | 只读。弹幕 / 礼物 / SC / 进场 |
 | **发弹幕** | 模型（要 `confirm=true`）或设置页 | 默认关；同一房间 60 秒 1 条；每次写日志 |
 | **申请进入某房间** | 模型 | 只写一条待批申请，**放行必须人来点** |
-| **挂着听** | 模型或设置页 | 后台 worker 收弹幕写 hint，够得着时 POST 到你的 webhook |
+| **挂着听** | 模型或设置页 | 后台 worker 收弹幕写 hint，够得着时 POST 到你事先放行在 **webhook 白名单**里的地址 |
 | **自动陪聊** | 设置页开关 | 定时读增量弹幕（有转录时也读转录）→ 调一次模型判断要不要接话 → 写进队列由 worker 发 |
 | **听声音 / 语音转写**（v0.4） | 模型或设置页 | 后台拉流 → 分段 → 语音识别成带时间戳的文字；**只转文字，不发弹幕**；默认只留最近 5 分钟 |
 
@@ -84,7 +84,10 @@ dsh plugin --profile desktop add dsh-bili-live
 
 1. **先放行**：设置页「放行名单」→ 填房间号 / UP主昵称 / UID → 「放行」。
    名单为空 = 哪个房间都进不去，这是刻意的。
-2. **再挂机**（可选）：「挂着听」里填房间，webhook 可留空（留空就只写 hint，不打扰任何人）。
+2. **再挂机**（可选）：「挂着听」里填房间。webhook 那一栏是**下拉选的**，选项来自设置页的「挂机叫醒 · webhook 白名单」（留空就只写 hint，不打扰任何人）。
+   - 模型不能自己往里加地址：调 `bili_live_watch_start` 时给不在白名单里的 webhook，会被直接拒（`status: webhook_not_allowed`），worker 都不会被拉起来。
+   - 白名单只认 http(s)、不收带用户名/密码的地址；写 `https://bot.example.com` 放行那台机器的任意路径，写 `https://bot.example.com/wake` 就只放行那一条。
+   - worker POST 时**不跟随跳转**，响应最多读 4 KB，落进状态日志的部分还会再截到 500 字。
 3. **要它开口**：把「允许发弹幕」打开。之后模型调 `bili_live_send`（带 `confirm=true`）或你在设置页手动发都能用。
 4. **自动陪聊**（可选）：选 provider / 模型、写人设、定节奏，然后勾「启用」。
    它大多数时候会选择沉默（模型回 `SKIP`），只在真有意思时才说一句。
@@ -150,6 +153,7 @@ dsh plugin --profile desktop add dsh-bili-live
   "pythonPath": "",
   "botName": "大肥鱼",
   "sendEnabled": false,
+  "webhookAllowlist": [],
   "autoChat": {
     "enabled": false,
     "provider": "", "model": "",
@@ -163,10 +167,11 @@ dsh plugin --profile desktop add dsh-bili-live
 
 - `sendEnabled`：发弹幕总开关。默认 `false`（先看后发）。
 - `botName`：它在房里的名字，用来判断「有人点名」。
+- `webhookAllowlist`：挂机叫醒允许 POST 的地址（v0.4.1）。空数组 = 谁都不叫醒；只有人能从这里加，模型加的会被拒。
 - `autoChat.minGapSec` / `perHour` / `maxChars`：两次开口的间隔、每小时上限、单句字数上限。
 - `audio.device`：`auto`（先试 GPU，失败退 CPU）/ `cpu` / `cuda`；`window` 每段秒数；`overlap` 相邻段重叠；`keep` 转录文本保留秒数。
 
-## 安全：设置页那几个接口怎么守的（v0.3.0）
+## 安全：设置页那几个接口怎么守的（v0.3.0 起，v0.4.1 补 webhook）
 
 插件在宿主里注册了 `/dsh-bili-live/*` 一组本地 HTTP 接口，给设置页用。这些接口能改配置、能动放行名单、能发弹幕，所以不是"能连上本机端口就算数"：
 
@@ -177,6 +182,13 @@ dsh plugin --profile desktop add dsh-bili-live
 另外 **网页端不许把插件指到任意可执行程序**：`pythonPath` 与 `audio.asrPython` 仅接受插件固定 venv 解释器，或本机配置文件/环境变量已明确指定的解释器。必须为存在的绝对文件路径；比较真实路径，固定 venv 内的路径不得通过符号链接逃出 venv。取消首次配置例外，不按文件名或任意目录前缀放行；其它路径返回 403，要新增信任路径请由管理员直接改本机配置。普通 `/config` 与听觉启动接口均执行相同校验。
 
 发弹幕的房间授权不在这层放宽：真正的闸在 `python/live_mcp.py` 的 `bili_live_send` —— 房间不在 `live-allow.json` 里一律拒绝。
+
+**webhook 也是同一套思路（v0.4.1）**：挂机 worker 会真的去 POST 一个地址、还把响应写进状态日志，所以目标不能由模型随口指定。
+
+1. 目标必须落在 `config.json` 的 `webhookAllowlist` 里（设置页的「挂机叫醒 · webhook 白名单」是人填的，模型的写配置入口没有浏览器登录态）；
+2. JS 侧（`lib/webhook.mjs`）在工具入口、`/dsh-bili-live/watch`、`/dsh-bili-live/config` 三处各核一次，不通过就 `webhook_not_allowed` / 403，worker 不会被拉起；
+3. Python 侧在 `bili_live_watch_start` 和 worker 的 `_wake` 里再各核一次（worker 不信一次性的入口检查）；
+4. 响应最多读 4 KB、落日志再截到 500 字，**不跟随 3xx 跳转**（`_NoRedirect`），超时 10 秒。
 
 ## 数据都在哪
 

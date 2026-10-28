@@ -906,6 +906,71 @@ def _tail_lines(path: Path, n: int = 3) -> list:
         return []
 
 
+CONFIG_FILE = HOME / "config.json"
+
+WEBHOOK_MAX_URL = 2048
+WEBHOOK_MAX_ENTRIES = 20
+
+
+def parse_webhook_target(raw: str):
+    """把 webhook 地址规范化成 (origin, path)；不合法返回 None。
+
+    和 lib/webhook.mjs 的 parseTarget() 保持同一套规则：只认 http(s)、不收用户名/密码、
+    origin 小写、默认端口省略、path 至少是 "/"。
+    """
+    text = str(raw or "").strip()
+    if not text or len(text) > WEBHOOK_MAX_URL:
+        return None
+    try:
+        u = urllib.parse.urlsplit(text)
+        port = u.port
+    except ValueError:
+        return None
+    if u.scheme not in ("http", "https"):
+        return None
+    if u.username or u.password:
+        return None
+    host = (u.hostname or "").lower()
+    if not host or any(ch in host for ch in " \t\r\n@\\/"):
+        return None
+    default_port = 443 if u.scheme == "https" else 80
+    suffix = "" if port in (None, default_port) else f":{port}"
+    path = u.path or "/"
+    if not path.startswith("/"):
+        return None
+    return f"{u.scheme}://{host}{suffix}", path
+
+
+def webhook_allowlist() -> list:
+    """config.json 里用户预先配好的 webhook 白名单（模型不能改它）。"""
+    cfg = _read_json(CONFIG_FILE)
+    raw = cfg.get("webhookAllowlist") if isinstance(cfg, dict) else None
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw[:WEBHOOK_MAX_ENTRIES]:
+        target = parse_webhook_target(item)
+        if target and target not in out:
+            out.append(target)
+    return out
+
+
+def webhook_allowed(url: str) -> dict:
+    """webhook 是否允许 POST：只认用户预先放行的地址（白名单条目 / = 放行整个源）。"""
+    target = parse_webhook_target(url)
+    if not target:
+        return {"ok": False, "error": "webhook 必须是合法的 http(s) 地址，且不能带用户名/密码"}
+    allow = webhook_allowlist()
+    if not allow:
+        return {
+            "ok": False,
+            "error": "config.json 的 webhookAllowlist 是空的：webhook 只能 POST 到用户预先配好的地址（请用户在设置页里加）",
+        }
+    for origin, path in allow:
+        if origin == target[0] and (path == "/" or path == target[1]):
+            return {"ok": True, "origin": target[0], "path": target[1]}
+    return {"ok": False, "error": f"{target[0]}{target[1]} 不在 webhookAllowlist 里（请用户在设置页里加）"}
+
 def _watch_snapshot(d: Path) -> dict:
     meta = _read_json(d / "watch.json")
     pid = int(meta.get("pid") or 0)
@@ -944,7 +1009,8 @@ async def bili_live_watch_start(room_id: Union[int, str] = DEFAULT_ROOM, webhook
 
     Args:
         room_id: 房间号 / UP主昵称 / uid
-        webhook: 够得着时 POST 到这个地址（自己的 bot / 自动化都行）；留空=只收弹幕、只写 hint
+        webhook: 够得着时 POST 到这个地址；**必须是用户在 config.json 的 webhookAllowlist 里预先放行的地址**
+            （模型不能自己往里加；留空=只收弹幕、只写 hint）
         wake_cooldown: 两次叫醒最少间隔秒数（默认 90；被 @ / 点名时立刻叫）
         judge_sec: 多久看一次增量（默认 60）
         max_wakes_per_hour: 每小时最多叫醒几次（默认 30，防刷爆 token）
@@ -956,6 +1022,17 @@ async def bili_live_watch_start(room_id: Union[int, str] = DEFAULT_ROOM, webhook
     denied = await _allow_check(rid)
     if denied:
         return json.dumps({"ok": False, "status": "not_allowed", "room_id": rid, "error": denied}, ensure_ascii=False)
+    # 0.4.1：webhook 只认用户预先放行的地址 —— 不让模型临时指定目标（SSRF 口子）。
+    if str(webhook or "").strip():
+        gate = webhook_allowed(str(webhook).strip())
+        if not gate.get("ok"):
+            return json.dumps({
+                "ok": False,
+                "status": "webhook_not_allowed",
+                "room_id": rid,
+                "error": gate.get("error"),
+                "webhookAllowlist": [origin + ("" if path == "/" else path) for origin, path in webhook_allowlist()],
+            }, ensure_ascii=False, indent=2)
     d = _watch_dir(rid)
     old = _read_json(d / "watch.json")
     if _pid_alive(int(old.get("pid") or 0)):
