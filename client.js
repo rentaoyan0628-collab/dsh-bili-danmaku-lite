@@ -37,11 +37,15 @@ window.__ModuleLoader__.load({
       const [watchForm, setWatchForm] = useState({ room_id: '', webhook: '' })
       const [reqRoom, setReqRoom] = useState('')
       const [cfg, setCfg] = useState(null)
+      const [allowText, setAllowText] = useState('')
 
       const load = useCallback(async () => {
         setBusy('load')
         const s = await api('state')
-        if (s.ok) { setSt(s); setCfg(s.config) }
+        if (s.ok) {
+          setSt(s); setCfg(s.config)
+          setAllowText(((s.config && s.config.webhookAllowlist) || []).join('\n'))
+        }
         else setMsg(s.error || '读取失败')
         setBusy('')
       }, [])
@@ -140,6 +144,27 @@ window.__ModuleLoader__.load({
           h('div', { className: 'bl-mut' }, '同一房间 60 秒只能发 1 条（历史是 60 秒冷却，硬编码在 Python 里）。发出去删不掉 —— 每次都会写进 logs/danmaku.jsonl。'),
         ),
 
+        // ── 挂机叫醒的白名单（0.4.1：只有人能加，模型不能）
+        h('div', { className: 'bl-card' },
+          h('div', { className: 'bl-h' }, '挂机叫醒 · webhook 白名单'),
+          h('div', { className: 'bl-mut' }, '挂机 worker 够得着时只会 POST 到这里的地址；模型没法自己添新地址（添了也会被拒）。一行一个，留空=谁都不叫醒、只写 hint。'),
+          h('textarea', {
+            className: 'bl-in bl-w',
+            rows: 4,
+            value: allowText,
+            placeholder: 'https://example.com/hook' + '\n' + 'https://bot.example.com/bili/wake',
+            onChange: (e) => setAllowText(e.target.value),
+          }),
+          h('div', { className: 'bl-row' },
+            h('button', {
+              className: 'bl-btn',
+              disabled: busy !== '',
+              onClick: () => saveCfg({ webhookAllowlist: allowText.split('\n').map((x) => x.trim()).filter(Boolean) }),
+            }, '保存白名单'),
+            h('span', { className: 'bl-mut' }, '已放行：' + (((cfg && cfg.webhookAllowlist) || []).join('、') || '（空）')),
+          ),
+          h('div', { className: 'bl-mut' }, '只写了源（比如 https://bot.example.com）就放行那台机器的任意路径；写了路径就只放行那一条。不要放行内网/回环地址，除非你确实要这么做。'),
+        ),
         // ── 放行名单
         h('div', { className: 'bl-card' },
           h('div', { className: 'bl-h' }, '放行名单 · 只有人能加'),
@@ -187,7 +212,7 @@ window.__ModuleLoader__.load({
         // ── 挂着听
         h('div', { className: 'bl-card' },
           h('div', { className: 'bl-h' }, '挂着听（' + watching.length + ' 个房间）'),
-          h('div', { className: 'bl-mut' }, 'worker 在后台收弹幕、写 hint；够得着时 POST 到你的 webhook（没配就只写 hint，不打扰任何人）。收工点「停」。'),
+          h('div', { className: 'bl-mut' }, 'worker 在后台收弹幕、写 hint；够得着时 POST 到上面那个白名单里选中的地址（不选就只写 hint，不打扰任何人）。收工点「停」。'),
           h('div', { className: 'bl-list' },
             watching.length === 0
               ? h('div', { className: 'bl-mut' }, '（没有在挂的房间）')
@@ -207,7 +232,14 @@ window.__ModuleLoader__.load({
           h('div', { className: 'bl-sep' }),
           h(Field, { label: '房间' },
             h('input', { className: 'bl-in', placeholder: '房间号 / 昵称 / UID', value: watchForm.room_id, onChange: (e) => setWatchForm({ ...watchForm, room_id: e.target.value }) }),
-            h('input', { className: 'bl-in bl-w', placeholder: 'webhook 地址（可留空）', value: watchForm.webhook, onChange: (e) => setWatchForm({ ...watchForm, webhook: e.target.value }) }),
+            h('select', {
+              className: 'bl-in bl-w',
+              value: watchForm.webhook,
+              onChange: (e) => setWatchForm({ ...watchForm, webhook: e.target.value }),
+            },
+              h('option', { value: '' }, '不叫醒任何人（只写 hint）'),
+              ...(((cfg && cfg.webhookAllowlist) || []).map((u) => h('option', { key: u, value: u }, u))),
+            ),
             h('button', {
               className: 'bl-btn bl-primary',
               disabled: busy !== '' || !watchForm.room_id.trim(),

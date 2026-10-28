@@ -34,6 +34,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { McpClient } from './lib/mcp.mjs'
+import { MAX_ALLOW_ENTRIES, formatAllowEntry, isAllowed as webhookAllowed, normalizeAllowlist, parseTarget } from './lib/webhook.mjs'
 
 export const name = 'bili-live'
 // tools / webServer 是必需的；llm 只在「自动陪聊」时才用，所以不写进 inject，
@@ -62,6 +63,9 @@ const DEFAULTS = {
   botName: '大肥鱼',
   // 发弹幕的总开关：关着的时候模型和设置页都发不出去（默认关，先看后发）
   sendEnabled: false,
+  // 挂机「叫醒」的 webhook 白名单：只允许 POST 到这里列出的地址。
+  // 模型不能自己往里加 —— 只有本机配置文件 / 设置页（人在操作）能改。
+  webhookAllowlist: [],
   // 自动陪聊（默认关；开了也要 sendEnabled）
   autoChat: {
     enabled: false,
@@ -132,6 +136,8 @@ function normalizeCfg(raw) {
     pythonPath: String(r.pythonPath || '').trim(),
     botName: String(r.botName || DEFAULTS.botName).trim().slice(0, 20) || DEFAULTS.botName,
     sendEnabled: Boolean(r.sendEnabled),
+    webhookAllowlist: normalizeAllowlist(Array.isArray(r.webhookAllowlist) ? r.webhookAllowlist : [])
+      .map(formatAllowEntry),
     autoChat: {
       enabled: Boolean(ac.enabled),
       provider: String(ac.provider || '').trim().slice(0, 60),
@@ -657,18 +663,25 @@ function registerTools() {
   tool({
     name: 'bili_live_watch_start',
     description: '在放行过的直播间「挂着听」：起一个后台 worker 收弹幕，够得着时 POST 到你的 webhook。'
-      + '房间没开播会被拦下。',
+      + '房间没开播会被拦下。webhook 只能是用户在配置里预先放行的地址（webhookAllowlist），'
+      + '模型不能自己指定新地址；留空=只写 hint、不叫醒任何人。',
     parameters: {
       room_id: { type: 'string', description: '直播间号 / UP主昵称 / UID' },
-      webhook: { type: 'string', description: '够得着时 POST 到这个地址；留空=只写 hint' },
+      webhook: { type: 'string', description: '够得着时 POST 到这个地址；必须在 webhookAllowlist 里；留空=只写 hint' },
       wake_cooldown: { type: 'number', description: '两次叫醒最少间隔秒数（默认 90）' },
       judge_sec: { type: 'number', description: '多久看一次增量（默认 60）' },
       max_wakes_per_hour: { type: 'number', description: '每小时最多叫醒几次（默认 30）' },
     },
     async execute(args) {
+      const webhook = String(args.webhook ?? '').trim()
+      // ⭐ 0.4.1：模型给的 webhook 必须命中用户预先配的白名单，否则连 worker 都不拉。
+      if (webhook) {
+        const gate = webhookAllowed(webhook, cfg.webhookAllowlist)
+        if (!gate.ok) return jsonish({ ok: false, status: 'webhook_not_allowed', error: gate.error, webhookAllowlist: cfg.webhookAllowlist })
+      }
       return jsonish(await call('bili_live_watch_start', {
         room_id: String(args.room_id ?? ''),
-        webhook: String(args.webhook ?? ''),
+        webhook,
         wake_cooldown: Number(args.wake_cooldown) || 90,
         judge_sec: Number(args.judge_sec) || 60,
         max_wakes_per_hour: Number(args.max_wakes_per_hour) || 30,
@@ -896,6 +909,13 @@ function registerRoutes(ctx) {
           const gate = pythonPathAllowed(patch.pythonPath)
           if (!gate.ok) return sendJson(res, 403, { ok: false, error: gate.error, config: cfg })
         }
+        // 0.4.1：webhook 白名单只由人来加（这个页面是人在点，模型没有浏览器登录态）。
+        if (patch && Object.prototype.hasOwnProperty.call(patch, 'webhookAllowlist')) {
+          const list = Array.isArray(patch.webhookAllowlist) ? patch.webhookAllowlist : []
+          const bad = list.filter((x) => !parseTarget(x))
+          if (bad.length) return sendJson(res, 400, { ok: false, error: '这些地址不是合法的 http(s) 地址：' + bad.join('、'), config: cfg })
+          if (list.length > MAX_ALLOW_ENTRIES) return sendJson(res, 400, { ok: false, error: '白名单最多 ' + MAX_ALLOW_ENTRIES + ' 条', config: cfg })
+        }
         persistCfg(patch)
         log('设置已改：' + JSON.stringify(patch).slice(0, 200))
         // 改了 python 路径就把旧的 MCP 关掉，下一条消息会按新解释器重建
@@ -1001,11 +1021,17 @@ function registerRoutes(ctx) {
       const body = await readBody(req)
       const action = String(body.action || 'start')
       const roomId = String(body.room_id || '').trim()
+      const webhook = String(body.webhook || '').trim()
+      // 0.4.1：和工具侧同一条规则 —— 只认用户预先放行的地址（这里的页面本来就是人在点）。
+      if (action !== 'stop' && webhook) {
+        const gate = webhookAllowed(webhook, cfg.webhookAllowlist)
+        if (!gate.ok) return sendJson(res, 403, { ok: false, error: gate.error, config: cfg })
+      }
       const r = action === 'stop'
         ? jsonish(await call('bili_live_watch_stop', { room_id: roomId }))
         : jsonish(await call('bili_live_watch_start', {
           room_id: roomId,
-          webhook: String(body.webhook || ''),
+          webhook,
           wake_cooldown: Number(body.wake_cooldown) || 90,
           judge_sec: Number(body.judge_sec) || 60,
           max_wakes_per_hour: Number(body.max_wakes_per_hour) || 30,

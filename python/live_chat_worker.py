@@ -15,7 +15,7 @@
     /api/socialV2/wake 把对应 QQ 会话叫醒，带 wake-cooldown 秒冷却，防止刷爆。
   - 不接 wake-key 时只写 hint.json 不叫醒（纯收弹幕模式）。
 """
-import argparse, asyncio, json, os, re, sys, time, datetime, urllib.request
+import argparse, asyncio, json, os, re, sys, time, datetime, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import live_mcp
@@ -31,8 +31,23 @@ _DEFAULT_HOME = os.environ.get("DSH_BILI_LIVE_HOME") or os.path.join(os.path.dir
 DEFAULT_DIR = os.path.join(os.path.abspath(_DEFAULT_HOME), "live-chat")
 
 
-def now():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# 0.4.1：webhook 响应只读这么多 —— 对方返回多少都不许把状态日志撑爆。
+WAKE_MAX_RESP_BYTES = 4096
+WAKE_MAX_BODY_CHARS = 500
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不让 webhook 把请求带跑：3xx 直接当错误，不跟随。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise urllib.error.HTTPError(newurl, code, "webhook 不允许跳转", headers, fp)
+
+
+def _wake_opener():
+    return urllib.request.build_opener(_NoRedirect)
+
+
+def now():    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def live_status(mid: int) -> dict:
@@ -322,8 +337,16 @@ async def main_async(args):
         想让它去叫你自己的 bot，就在设置页里填一个 webhook 地址。
         """
         url = str(getattr(args, "webhook", "") or "").strip()
+        res = None
+        if url:
+            # 0.4.1：model 侧已经验过一次，这里是 worker 侧的第二道 —— 没放行就绝不发。
+            gate = live_mcp.webhook_allowed(url)
+            if not gate.get("ok"):
+                res = {"ok": False, "skipped": "webhook 不在白名单", "error": gate.get("error")}
+                url = ""
         if not url:
-            res = {"ok": True, "skipped": "没有配 webhook，只写 hint"}
+            if res is None:
+                res = {"ok": True, "skipped": "没有配 webhook，只写 hint"}
         else:
             payload = {
                 "source": "dsh-bili-live",
@@ -344,12 +367,22 @@ async def main_async(args):
                     headers={"content-type": "application/json; charset=utf-8"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 - 用户自己填的地址
-                    raw = resp.read().decode("utf-8", "replace")
+                with _wake_opener().open(req, timeout=10) as resp:  # noqa: S310 - 地址已在上面核过白名单
+                    blob = resp.read(WAKE_MAX_RESP_BYTES)
+                    status = getattr(resp, "status", 0)
+                truncated = len(blob) >= WAKE_MAX_RESP_BYTES
+                raw = blob.decode("utf-8", "replace")
+                if truncated:
+                    return {
+                        "ok": True,
+                        "http_status": status,
+                        "truncated": True,
+                        "body": raw[:WAKE_MAX_BODY_CHARS],
+                    }
                 try:
                     return json.loads(raw)
                 except Exception:
-                    return {"ok": True, "http_status": getattr(resp, "status", 0), "body": raw[:200]}
+                    return {"ok": True, "http_status": status, "body": raw[:WAKE_MAX_BODY_CHARS]}
 
             try:
                 res = await asyncio.to_thread(_post)
