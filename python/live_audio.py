@@ -93,18 +93,41 @@ def resolve_stream_url(room_id: int) -> str:
     streams = playurl.get("stream") or []
     if not streams:
         raise RuntimeError("没拿到播放流（房间没开播，或者这个房间需要登录）")
-    # 优先 HLS（断流能自动重连），其次 http_stream；同一路里挑 qn 最高的
+    # Audio-only capture: prefer HTTP-FLV; this room's HLS CDN fails TLS reads.
+    # Start with the alternate CDN, which passed the bounded PCM capture probe.
     def rank(stream):
         proto = str(stream.get("protocol_name") or "")
-        return 0 if proto == "http_hls" else 1
+        return 0 if proto == "http_stream" else 1
     for stream in sorted(streams, key=rank):
         best = None
         for fmt in stream.get("format") or []:
             for codec in fmt.get("codec") or []:
-                for info in codec.get("url_info") or []:
+                # base_url belongs to codec, not to its CDN url_info entries.
+                base_url = str(codec.get("base_url") or "")
+                if not base_url.startswith("/") or base_url.startswith("//"):
+                    continue
+                for info in reversed(codec.get("url_info") or []):
+                    host = str(info.get("host") or "")
+                    extra = str(info.get("extra") or "")
+                    try:
+                        origin = urllib.parse.urlsplit(host)
+                        if (origin.scheme not in ("http", "https") or not origin.hostname
+                                or origin.username or origin.password or origin.query or origin.fragment
+                                or origin.path not in ("", "/")):
+                            continue
+                        origin.port  # Reject malformed port values before invoking ffmpeg.
+                    except ValueError:
+                        continue
+                    candidate = host.rstrip("/") + base_url
+                    if extra:
+                        # Bilibili base_url may already end in ? or contain query fields.
+                        separator = "" if candidate.endswith(("?", "&")) else ("&" if "?" in base_url else "?")
+                        candidate += separator + extra.lstrip("?&")
+                    if any(ch.isspace() or ord(ch) < 32 for ch in candidate):
+                        continue
                     qn = int(codec.get("current_qn") or 0)
                     if best is None or qn > best[0]:
-                        best = (qn, str(info.get("host") or "") + str(info.get("base_url") or "") + str(info.get("extra") or ""))
+                        best = (qn, candidate)
         if best and best[1]:
             return best[1]
     raise RuntimeError("播放信息里没有可用的 url_info")
@@ -142,6 +165,7 @@ class FasterWhisperEngine:
 
 class WhisperCppEngine:
     name = "whisper.cpp"
+    device = "vulkan"
 
     def __init__(self, binary: str, model_path: str, language: str):
         if not Path(binary).is_file():
@@ -207,7 +231,7 @@ def build_engine(args, home: Path):
                 note["fallback"] = True
                 log("GPU 初始化失败，退回 CPU —— " + note["device_error"])
     # 2) whisper.cpp（Vulkan 版能吃 AMD 卡）
-    if binary and args.engine in ("auto", "whispercpp"):
+    if binary and args.device != "cpu" and args.engine in ("auto", "whispercpp"):
         try:
             return WhisperCppEngine(binary, model_bin, args.language), note
         except Exception as exc:  # noqa: BLE001
@@ -446,6 +470,22 @@ def main() -> int:
                         status["last_error"] = "转写失败：%s: %s" % (type(exc).__name__, exc)
                         write_json(status_path, status)
                         log(status["last_error"], logf)
+                        if isinstance(engine, WhisperCppEngine):
+                            # Vulkan errors occur during inference, not the file-only constructor.
+                            status["device_error"] = "%s: %s" % (type(exc).__name__, exc)
+                            status["fallback"] = True
+                            write_json(status_path, status)
+                            log("Vulkan 失败，保留原始报错并切换 CPU：" + status["device_error"], logf)
+                            try:
+                                engine = FasterWhisperEngine(args.model, "cpu", args.language)
+                                status["engine"] = engine.name
+                                status["device"] = "cpu"
+                            except Exception as cpu_exc:
+                                status["state"] = "error"
+                                status["last_error"] += " | CPU fallback: %s: %s" % (type(cpu_exc).__name__, cpu_exc)
+                                write_json(status_path, status)
+                                return 4
+                            write_json(status_path, status)
                         time.sleep(1)
                         continue
                     if text:

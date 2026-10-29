@@ -99,7 +99,7 @@ dsh plugin --profile desktop add dsh-bili-live
 2. 装转写引擎（选一个）：
    - **faster-whisper**（CPU）：`pip install faster-whisper` 到插件用的那个 venv；装在别的 venv 就用 `DSH_BILI_LIVE_ASR_PYTHON` 指过去。
    - **whisper.cpp**（能吃 AMD 显卡的 Vulkan 版）：装好后设 `DSH_BILI_LIVE_WHISPERCPP` 指向 `whisper-cli.exe`，再放一个模型文件（`ggml-*.bin`），设 `DSH_BILI_LIVE_WHISPERCPP_MODEL`。
-3. 转写不必用插件自己的 Python：配置里的 `audio.asrPython`（设置页「转写解释器」那个输入框）可以指向另一个已经装好 faster-whisper 的解释器。为了不让网页随手把本机任意程序设成解释器，这里只接受 `$DSH_HOME` 之下的路径；别处的会被 403 拒掉，要改就直接改配置文件。
+3. 转写不必用插件自己的 Python：配置里的 `audio.asrPython`（设置页「转写解释器」那个输入框）可以指向另一个已经装好 faster-whisper 的解释器。网页端只接受插件固定 venv 或本机配置/环境变量已明确指定的解释器，不再按整个 `$DSH_HOME` 目录放行；新增其它环境需由管理员直接修改本机配置文件。
 
 **GPU**
 
@@ -172,9 +172,9 @@ dsh plugin --profile desktop add dsh-bili-live
 
 1. **先过 DSH 的信任栅栏** `connection.requestRejection` —— 宿主级鉴权（认 cookie/token），隧道或反代把 Host 改写成回环也挡得住；
 2. **再过本机同源** —— Host 必须是回环地址，Origin/Referer 必须同端口（挡掉浏览器里另一个本地页面借你的登录态驱动这些写接口）；
-3. 栅栏拿不到时（老宿主）不静默放行，第 2 条就是唯一防线，两道都不成一律 403。
+3. **认证不可用时拒绝访问**：拿不到宿主认证服务时，所有插件 HTTP 接口返回 503，不再降级为“本机同源即放行”；认证调用抛错或返回拒绝结果时拒绝访问。只有认证明确通过后才检查本机同源。
 
-另外 **网页端不许把插件指到任意可执行程序**：`pythonPath` 只接受三种值——插件自己的 venv、本机自动探测到的解释器、或首次配置时填的 python 可执行文件；其它路径返回 403，要换请直接改 `config.json`（本机文件）。
+另外 **网页端不许把插件指到任意可执行程序**：`pythonPath` 与 `audio.asrPython` 仅接受插件固定 venv 解释器，或本机配置文件/环境变量已明确指定的解释器。必须为存在的绝对文件路径；比较真实路径，固定 venv 内的路径不得通过符号链接逃出 venv。取消首次配置例外，不按文件名或任意目录前缀放行；其它路径返回 403，要新增信任路径请由管理员直接改本机配置。普通 `/config` 与听觉启动接口均执行相同校验。
 
 发弹幕的房间授权不在这层放宽：真正的闸在 `python/live_mcp.py` 的 `bili_live_send` —— 房间不在 `live-allow.json` 里一律拒绝。
 
