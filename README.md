@@ -1,4 +1,8 @@
-# dsh-bili-live
+# dsh-bili-danmaku-lite
+
+> **名字变了**：这个包原来叫 `dsh-bili-live`，现在叫 `dsh-bili-danmaku-lite`。旧包不再发新版，装了旧包的人把 `dsh plugin` 那条命令换成新名字即可；插件在宿主里的运行时 id 仍是 `bili-live`，配置目录（`$DSH_HOME/bili-live`）、放行名单、发弹幕日志都沿用，不会丢。
+>
+> **「lite」是说运行开销小，不是功能被砍**：看弹幕、发弹幕、挂机听、可选自动陪聊、可选语音转写都在。轻在「不常驻重进程、不默认下载模型、闲时几乎不占 CPU」——重活只有你打开对应开关时才会起来。
 
 **DeepSeek Harness (DSH) Bilibili Live Plugin / B站直播弹幕 AI 插件**：实时读取 Bilibili 直播间弹幕、在用户授权后发送弹幕，并提供可选的 AI 自动陪聊。无需 QQBridge 或 QQ 机器人。
 
@@ -47,18 +51,20 @@
 从 GitHub 源码安装到 desktop profile：
 
 ```bash
-dsh plugin --profile desktop add github:rentaoyan0628-collab/dsh-bili-live
+dsh plugin --profile desktop add github:rentaoyan0628-collab/dsh-bili-danmaku-lite
 ```
 
-npm 安装方式（请先确认 [npm 包页面](https://www.npmjs.com/package/dsh-bili-live) 已有发布版本；发布者为 `n0y0t`）：
+npm 安装方式（包页：[dsh-bili-danmaku-lite](https://www.npmjs.com/package/dsh-bili-danmaku-lite)，发布者 `n0y0t`）：
 
 ```bash
-dsh plugin --profile desktop add dsh-bili-live
+dsh plugin --profile desktop add dsh-bili-danmaku-lite
 ```
 
-安装插件后仍需完成下面的 Python 依赖和 B站凭证配置。v0.2.0 尚未完成独立插件端到端运行验证，适合愿意反馈问题的用户使用。
+> 旧名字 `dsh-bili-live` 在 npm 上已被标记为废弃（deprecated），指向这个新包；别同时装两个，运行时 id 相同会冲突。
 
-1. 把整个目录放进 DSH 的插件位置（或 `npm i` 到 profile 里），然后在 `dsh.profile.bundles` 里列出 `dsh-bili-live`。
+安装插件后仍需完成下面的 Python 依赖和 B站凭证配置。**v0.4.2 尚未做端到端直播实测**（代码层过了语法检查与单元测试），适合愿意反馈问题的用户使用。
+
+1. 把整个目录放进 DSH 的插件位置（或 `npm i` 到 profile 里），然后在 `dsh.profile.bundles` 里列出 `dsh-bili-danmaku-lite`。
    插件自带的 `cordis.patch.yml` 只插入一条默认配置（默认全关）。
 
 2. 装 Python 依赖（**装进插件自己的 venv**，别装进系统 Python）：

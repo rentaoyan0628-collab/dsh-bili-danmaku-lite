@@ -1,14 +1,14 @@
 {
-  "name": "dsh-bili-live",
-  "version": "0.4.1",
-  "description": "DeepSeek Harness (DSH) Bilibili Live 弹幕插件：实时监听、授权发弹幕、可选 AI 自动陪聊；无需 QQBridge。",
+  "name": "dsh-bili-danmaku-lite",
+  "version": "0.4.2",
+  "description": "DSH 轻量 B站直播弹幕插件：看弹幕、授权发弹幕、挂机听、可选 AI 自动陪聊与可选语音转写；不常驻重进程，闲时几乎不占 CPU。",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rentaoyan0628-collab/dsh-bili-live.git"
+    "url": "git+https://github.com/rentaoyan0628-collab/dsh-bili-danmaku-lite.git"
   },
-  "homepage": "https://github.com/rentaoyan0628-collab/dsh-bili-live#readme",
-  "bugs": { "url": "https://github.com/rentaoyan0628-collab/dsh-bili-live/issues" },
+  "homepage": "https://github.com/rentaoyan0628-collab/dsh-bili-danmaku-lite#readme",
+  "bugs": { "url": "https://github.com/rentaoyan0628-collab/dsh-bili-danmaku-lite/issues" },
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -70,6 +70,8 @@
     "bilibili-live",
     "danmaku",
     "ai-chatbot",
-    "live-chat"
+    "live-chat",
+    "lite",
+    "lightweight"
   ]
 }
