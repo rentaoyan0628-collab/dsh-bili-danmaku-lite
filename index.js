@@ -901,6 +901,7 @@ function registerTools() {
 /* ────────────────────────── 设置页要的 HTTP 接口 ────────────────────────── */
 
 function sendJson(res, status, obj) {
+  if (status >= 500 && obj && obj.error) log('路由出错 ' + status + ' ' + String(obj.error).slice(0, 400))
   const body = JSON.stringify(obj)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(body)

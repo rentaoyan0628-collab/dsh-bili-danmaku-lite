@@ -72,13 +72,20 @@ window.__ModuleLoader__.load({
         setBusy('')
       }
 
-      const act = async (path, body, label) => {
+            const act = async (path, body, label) => {
         setBusy(label)
-        const r = await api(path, body)
-        setMsg(r && r.ok === false ? (r.error || r.message || '失败') : (label + '完成'))
-        await load()
-        setBusy('')
-        return r
+        try {
+          const r = await api(path, body)
+          setMsg(r && r.ok === false ? (r.error || r.message || '失败') : (label + '完成'))
+          await load()
+          return r
+        } catch (e) {
+          const t = String((e && e.message) || e)
+          setMsg('请求失败：' + t)
+          return { ok: false, error: t }
+        } finally {
+          setBusy('')
+        }
       }
 
       if (!st) {
