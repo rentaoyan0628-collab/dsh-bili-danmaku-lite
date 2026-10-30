@@ -60,9 +60,9 @@ npm 安装方式（包页：[dsh-bili-danmaku-lite](https://www.npmjs.com/packag
 dsh plugin --profile desktop add dsh-bili-danmaku-lite
 ```
 
-> 旧名字 `dsh-bili-live` 在 npm 上已被标记为废弃（deprecated），指向这个新包；别同时装两个，运行时 id 相同会冲突。
+> 旧名字 `dsh-bili-live` 已停止发新版（**尚未在 npm 上标 deprecated**），改用这个新包；别同时装两个，运行时 id 相同会冲突。
 
-安装插件后仍需完成下面的 Python 依赖和 B站凭证配置。**v0.4.2 尚未做端到端直播实测**（代码层过了语法检查与单元测试），适合愿意反馈问题的用户使用。
+安装插件后仍需完成下面的 Python 依赖和 B站凭证配置。**v0.4.3 修了改名时漏掉的 bundle patch 与设置页 id（仍写着旧包名，会导致插件加载不出设置页）**；Host 半端与 Python 侧沿用 v0.4.2 的代码。
 
 1. 把整个目录放进 DSH 的插件位置（或 `npm i` 到 profile 里），然后在 `dsh.profile.bundles` 里列出 `dsh-bili-danmaku-lite`。
    插件自带的 `cordis.patch.yml` 只插入一条默认配置（默认全关）。

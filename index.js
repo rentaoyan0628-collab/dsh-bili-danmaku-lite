@@ -557,7 +557,7 @@ async function askLlm(llm, sys, user) {
     role: 'user',
     id: randomUUID(),
     content: [{ type: 'text', text: user }],
-    source: { kind: 'plugin', plugin: 'dsh-bili-live' },
+    source: { kind: 'plugin', plugin: 'dsh-bili-danmaku-lite' },
   }]
   let out = ''
   try {

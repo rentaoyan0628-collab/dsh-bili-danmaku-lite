@@ -3,7 +3,7 @@
  * 在 设置 → 插件 →「B站直播」里出现。所有数据都从 /dsh-bili-live/* 拿。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-bili-live',
+  id: 'dsh-bili-danmaku-lite',
   factory: (require) => {
     const React = require('react')
     const h = React.createElement
