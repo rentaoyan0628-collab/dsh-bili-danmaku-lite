@@ -909,9 +909,18 @@ function sendJson(res, status, obj) {
 function readBody(req) {
   return new Promise((resolve) => {
     let raw = ''
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    // 宿主如果已经解析过 body，直接用，别等一个不会来的 end。
+    if (req.body && typeof req.body === 'object') return finish(req.body)
+    // 迟到：body 早走完了（鉴权 await 期间 end 已过），再挂监听会永远等不到 ⇒ 请求挂死
+    if (req.readableEnded || req.complete) return finish({})
     req.on('data', (c) => { raw = (raw + c).slice(-200000) })
-    req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}) } catch { resolve({}) } })
-    req.on('error', () => resolve({}))
+    req.on('end', () => { try { finish(raw ? JSON.parse(raw) : {}) } catch { finish({}) } })
+    req.on('error', () => finish({}))
+    req.on('close', () => finish({}))
+    const t = setTimeout(() => finish({}), 8000)
+    if (typeof t.unref === 'function') t.unref()
   })
 }
 
@@ -1011,9 +1020,12 @@ function registerRoutes(ctx) {
         kind: 'exact',
         path,
         handler: async (req, res) => {
+          // 先把 body 监听挂上，再去做鉴权：guard 里有 await，事件循环会转一圈，
+          // 小请求体可能在这期间就 end 了，之后再挂监听永远等不到 ⇒ 请求挂死不回。
+          const bodyP = readBody(req)
           if (!await guard(req, res)) return
           try {
-            await handler(req, res)
+            await handler(req, res, bodyP)
           } catch (e) {
             // 每个 handler 内部都自己 catch 了；这里是最后一道，且绝不写第二次响应
             if (!res.headersSent) sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
@@ -1024,7 +1036,7 @@ function registerRoutes(ctx) {
     } catch (e) { log('注册路由失败 ' + path + '：' + (e?.message ?? e)) }
   }
 
-  route('/dsh-bili-live/state', async (req, res) => {
+  route('/dsh-bili-live/state', async (req, res, bodyP) => {
     try {
       const allow = loadAllow()
       const d = await doctor()
@@ -1049,7 +1061,7 @@ function registerRoutes(ctx) {
   })
 
   // 转写体检：真去点一次 CUDA，把原始报错原样返回给设置页（慢，最多 3 分钟）
-  route('/dsh-bili-live/asr', async (req, res) => {
+  route('/dsh-bili-live/asr', async (req, res, bodyP) => {
     try {
       const r = jsonish(await call('bili_live_asr_probe', {}, { timeoutMs: 200000 }))
       return sendJson(res, 200, { ok: true, probe: r })
@@ -1058,10 +1070,10 @@ function registerRoutes(ctx) {
     }
   })
 
-  route('/dsh-bili-live/audio', async (req, res) => {
+  route('/dsh-bili-live/audio', async (req, res, bodyP) => {
     try {
       if (req.method === 'POST') {
-        const body = await readBody(req)
+        const body = await bodyP
         const action = String(body.action || '')
         const room = String(body.room_id || '')
         if (action === 'start') {
@@ -1103,10 +1115,10 @@ function registerRoutes(ctx) {
     }
   })
 
-  route('/dsh-bili-live/config', async (req, res) => {
+  route('/dsh-bili-live/config', async (req, res, bodyP) => {
     try {
       if (req.method === 'POST') {
-        const patch = await readBody(req)
+        const patch = await bodyP
         // ⭐ 0.3.0：网页端不许把插件指到任意可执行程序上（维护者 polang233 的复核意见）
         if (patch && Object.prototype.hasOwnProperty.call(patch, 'pythonPath')) {
           const gate = pythonPathAllowed(patch.pythonPath)
@@ -1168,13 +1180,13 @@ function registerRoutes(ctx) {
     })
   })
 
-  route('/dsh-bili-live/allow', async (req, res) => {
+  route('/dsh-bili-live/allow', async (req, res, bodyP) => {
     try {
       if (req.method !== 'POST') {
         const allow = loadAllow()
         return sendJson(res, 200, { ok: true, enforce: allow.enforce, rooms: allow.rooms })
       }
-      const body = await readBody(req)
+      const body = await bodyP
       const action = String(body.action || 'add')
       const ridRaw = String(body.room_id || '').trim()
       if (!ridRaw) return sendJson(res, 400, { ok: false, error: '缺 room_id' })
@@ -1185,10 +1197,10 @@ function registerRoutes(ctx) {
     }
   })
 
-  route('/dsh-bili-live/request', async (req, res) => {
+  route('/dsh-bili-live/request', async (req, res, bodyP) => {
     try {
       if (req.method !== 'POST') return sendJson(res, 200, { ok: true, requests: loadRequests(30) })
-      const body = await readBody(req)
+      const body = await bodyP
       const roomId = String(body.room_id || '').trim()
       const action = String(body.action || 'approve')
       if (!roomId) return sendJson(res, 400, { ok: false, error: '缺 room_id' })
@@ -1204,10 +1216,10 @@ function registerRoutes(ctx) {
     }
   })
 
-  route('/dsh-bili-live/send', async (req, res) => {
+  route('/dsh-bili-live/send', async (req, res, bodyP) => {
     try {
       if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '用 POST' })
-      const body = await readBody(req)
+      const body = await bodyP
       if (!cfg.sendEnabled) return sendJson(res, 400, { ok: false, error: '「允许发弹幕」是关的，先打开它' })
       // 房间授权不在这一层判：真正的闸在 live_mcp.py 的 bili_live_send —— 房间不在
       // live-allow.json 里一律拒绝。这里只是入口，不放宽任何权限。
@@ -1222,10 +1234,10 @@ function registerRoutes(ctx) {
     }
   })
 
-  route('/dsh-bili-live/watch', async (req, res) => {
+  route('/dsh-bili-live/watch', async (req, res, bodyP) => {
     try {
       if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '用 POST' })
-      const body = await readBody(req)
+      const body = await bodyP
       const action = String(body.action || 'start')
       const roomId = String(body.room_id || '').trim()
       const webhook = String(body.webhook || '').trim()
@@ -1249,10 +1261,10 @@ function registerRoutes(ctx) {
     }
   })
 
-  route('/dsh-bili-live/autochat', async (req, res) => {
+  route('/dsh-bili-live/autochat', async (req, res, bodyP) => {
     try {
       if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '用 POST' })
-      const body = await readBody(req)
+      const body = await bodyP
       const runNow = body && body.runNow === true
       const patch = { ...(body || {}) }
       delete patch.runNow
