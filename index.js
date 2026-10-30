@@ -1022,15 +1022,25 @@ function registerRoutes(ctx) {
         handler: async (req, res) => {
           // 先把 body 监听挂上，再去做鉴权：guard 里有 await，事件循环会转一圈，
           // 小请求体可能在这期间就 end 了，之后再挂监听永远等不到 ⇒ 请求挂死不回。
+          const t0 = Date.now()
+          // 先把 body 监听挂上，再去做鉴权：guard 里有 await，别让 body 在等待期间走完。
           const bodyP = readBody(req)
-          if (!await guard(req, res)) return
+          res.on('finish', () => log('HTTP ' + req.method + ' ' + path + ' → ' + res.statusCode + ' (' + (Date.now() - t0) + 'ms)'))
+          // 看门狗：30 秒还没回就把话说清楚，别让人对着一个永远转圈的面板猜。
+          const wd = setTimeout(() => {
+            if (res.headersSent) return
+            try { sendJson(res, 504, { ok: false, error: '后端 30 秒没回应（多半是 Python 卡住），看 logs/plugin.log' }) } catch { /* 已经关了 */ }
+            log('HTTP ' + req.method + ' ' + path + ' 超时 30s 未回应')
+          }, 30000)
+          if (typeof wd.unref === 'function') wd.unref()
           try {
+            if (!await guard(req, res)) return
             await handler(req, res, bodyP)
           } catch (e) {
             // 每个 handler 内部都自己 catch 了；这里是最后一道，且绝不写第二次响应
             if (!res.headersSent) sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
             log('路由 ' + path + ' 抛错：' + String(e?.message ?? e))
-          }
+          } finally { clearTimeout(wd) }
         },
       }))
     } catch (e) { log('注册路由失败 ' + path + '：' + (e?.message ?? e)) }

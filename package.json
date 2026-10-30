@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-danmaku-lite",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "DSH 轻量 B站直播弹幕插件：看弹幕、授权发弹幕、挂机听、可选 AI 自动陪聊与可选语音转写；不常驻重进程，闲时几乎不占 CPU。",
   "license": "MIT",
   "repository": {
