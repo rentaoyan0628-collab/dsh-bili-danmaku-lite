@@ -869,6 +869,27 @@ function registerTools() {
   })
 
   tool({
+    name: 'bili_highlights',
+    description: '查已经离线算好的直播高光时间点：哪一天几点弹幕突然变密、为什么算高光、现场说了什么。只读，不联网。',
+    parameters: {
+      room_id: { type: 'string', description: '直播间号 / UP主昵称 / UID；留空用默认房间' },
+      date: { type: 'string', description: '某一天：2026-10-30 / 10-30 / 10月30日；留空=所有日期' },
+      candidate_id: { type: 'string', description: '直接点某一段，如 H012（也可写 12）' },
+      keyword: { type: 'string', description: '在理由和现场弹幕里找词' },
+      limit: { type: 'number', description: '最多列几段，默认 5，最多 10' },
+    },
+    async execute(args) {
+      return jsonish(await call('bili_highlights', {
+        room_id: String(args.room_id ?? ''),
+        date: String(args.date ?? ''),
+        candidate_id: String(args.candidate_id ?? ''),
+        keyword: String(args.keyword ?? ''),
+        limit: clamp(Number(args.limit) || 5, 1, 10),
+      }))
+    },
+  })
+
+  tool({
     name: 'bili_live_asr_probe',
     description: '体检这台机器能不能用 GPU 转写：真点一次 CUDA 拿原始报错，再看 whisper.cpp / DirectML。只读。',
     parameters: {},

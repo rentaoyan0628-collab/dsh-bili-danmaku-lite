@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from bilibili_api import Credential, Danmaku, live, search
 
@@ -302,7 +303,7 @@ async def _room_info(room_id: int) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def bili_live_info(room_id: Union[int, str] = DEFAULT_ROOM, history_size: int = 10) -> str:
     """查直播间信息（是否在播、标题、分区、在线人数）和最近弹幕历史。只读，不会发送任何内容。
 
@@ -329,7 +330,7 @@ async def bili_live_info(room_id: Union[int, str] = DEFAULT_ROOM, history_size: 
     return json.dumps({"ok": True, "info": info, "recent_danmaku": hist}, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def bili_live_feed(room_id: Union[int, str] = DEFAULT_ROOM, seconds: int = 20, max_items: int = 40) -> str:
     """监听直播间实时消息若干秒（弹幕/礼物/SC/进场），只读。
 
@@ -489,7 +490,7 @@ def _throttle_hit(room_id: int, window_sec: int = 300) -> int:
     return len(arr)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
 async def bili_live_send(room_id: Union[int, str] = DEFAULT_ROOM, text: str = "", confirm: bool = False) -> str:
     """往直播间发一条弹幕。
 
@@ -633,7 +634,7 @@ async def bili_live_send(room_id: Union[int, str] = DEFAULT_ROOM, text: str = ""
     }, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_log(num: int = 20, room_id: Union[int, str] = "") -> str:
     """读最近的弹幕发送日志（logs/danmaku.jsonl，只读）。
 
@@ -677,7 +678,7 @@ async def bili_live_log(num: int = 20, room_id: Union[int, str] = "") -> str:
     }, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
 async def bili_live_allow(room_id: Union[int, str] = "", action: str = "list", anchor: str = "", until_offline: bool = False, expires_in_hours: float = 0) -> str:
     """【只给用户 / DSH 主会话】管理「允许进入的直播间」名单。
 
@@ -761,7 +762,7 @@ def _append_request(rid: int, anchor: str, reason: str, until_offline: bool) -> 
     return entry
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 async def bili_live_request(room_id: Union[int, str] = "", reason: str = "", until_offline: bool = True) -> str:
     """**向人申请**进入一个还没放行的直播间（放行由人在设置页里点，我自己开不了门）。
 
@@ -803,7 +804,7 @@ async def bili_live_request(room_id: Union[int, str] = "", reason: str = "", unt
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def bili_live_watching() -> str:
     """我此刻在看的直播间有哪些（放行名单 + 每个房间现在开没开播 + 我最近在里面说过什么）。
 
@@ -995,7 +996,7 @@ def _watch_snapshot(d: Path) -> dict:
     return snap
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def bili_live_watch_start(room_id: Union[int, str] = DEFAULT_ROOM, webhook: str = "", wake_cooldown: float = 90.0, judge_sec: float = 60.0, max_wakes_per_hour: int = 30) -> str:
     """在某个放行过的直播间「挂着听」：开一个后台 worker 收弹幕，够得着时 POST 到你的 webhook。
 
@@ -1125,7 +1126,7 @@ async def bili_live_watch_start(room_id: Union[int, str] = DEFAULT_ROOM, webhook
     return json.dumps({"ok": ok, "status": "started" if ok else "exited", "message": msg, "worker": snap}, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_watch_status(room_id: Union[int, str] = "") -> str:
     """看挂机状态：哪个房间挂着、worker 还活着吗、收了多少条弹幕、发了几条、叫醒过几次、
     最近一次 hint（新弹幕样本）是什么。只读。
@@ -1155,7 +1156,7 @@ async def bili_live_watch_status(room_id: Union[int, str] = "") -> str:
     return json.dumps({"ok": True, "summary": summary, "watching": snaps}, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_watch_stop(room_id: Union[int, str] = "") -> str:
     """让挂机 worker 收工：写 stop.flag，等它自己退；40 秒还不退就强杀。
 
@@ -1258,7 +1259,7 @@ def _audio_rooms() -> list:
     return [p for p in sorted(WATCH_ROOT.iterdir()) if p.is_dir() and (p / "audio.json").exists()]
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_audio_start(
     room_id: Union[int, str] = DEFAULT_ROOM,
     model: str = "small",
@@ -1347,7 +1348,7 @@ async def bili_live_audio_start(
     return json.dumps({"ok": alive, "status": "started" if alive else "exited", "message": msg, "audio": snap}, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_audio_stop(room_id: Union[int, str] = "") -> str:
     """关掉某个房间（留空=全部房间）的语音转写。只停转写，不影响弹幕监听。"""
     if str(room_id or "").strip():
@@ -1390,7 +1391,7 @@ async def bili_live_audio_stop(room_id: Union[int, str] = "") -> str:
     return json.dumps({"ok": True, "stopped": out}, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_audio_status(room_id: Union[int, str] = "") -> str:
     """看语音转写状态：谁在听、哪个引擎/设备、GPU 有没有失败、最近听到什么。只读。"""
     if str(room_id or "").strip():
@@ -1402,7 +1403,7 @@ async def bili_live_audio_status(room_id: Union[int, str] = "") -> str:
     return json.dumps({"ok": True, "items": [_audio_snapshot(p) for p in _audio_rooms()]}, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_transcript(room_id: Union[int, str] = DEFAULT_ROOM, last: int = 20) -> str:
     """读某个房间最近的语音转写（带时间戳）。只读；只保留最近 keep 秒（默认 5 分钟）。
 
@@ -1425,7 +1426,7 @@ async def bili_live_transcript(room_id: Union[int, str] = DEFAULT_ROOM, last: in
     return json.dumps({"ok": True, "room_id": rid, "count": len(recs), "lines": recs}, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 async def bili_live_asr_probe() -> str:
     """体检这台机器能不能用 GPU 转写：真去点一次 CUDA 拿原始报错，再看 whisper.cpp 与 DirectML。只读。"""
     if not AUDIO_PROBE.is_file():
@@ -1446,6 +1447,38 @@ async def bili_live_asr_probe() -> str:
         return json.dumps(data, ensure_ascii=False, indent=2)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"ok": False, "error": type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+async def bili_highlights(room_id: Union[int, str] = "", date: str = "", candidate_id: str = "",
+                         keyword: str = "", limit: int = 5) -> str:
+    """查已经离线算好的「直播高光时间点」：哪一天几点弹幕突然变密、为什么算高光、现场说了什么。
+
+    用途：有人问「上次直播哪段值得剪 / 有没有高光 / 某天有什么精彩的地方 / 第几段是什么」
+    就查这里——这是现成的结论，不用再去翻原始弹幕。只读，不联网，不发任何东西。
+
+    Args:
+        room_id: 房间号 / UP主昵称 / UID；留空用默认房间
+        date: 某一天："2026-10-30"、"10-30"、"10月30日"。留空=最近的所有日期
+        candidate_id: 直接点某一段的编号，如 "H012"（也可写 "12"）
+        keyword: 在理由和现场弹幕里找词，如 "boss"、"笑"
+        limit: 最多列几段（默认 5，最多 10）
+
+    返回里 text 是可以直接念给人听的中文；candidates 是结构化字段。
+    注意：这是「按弹幕推出来的候选时间点」，不是画面确认；只给北京时间。
+    """
+    try:
+        rid = await _resolve_room(room_id)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": "找不到这个直播间：" + type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import highlights_index  # noqa: PLC0415
+        data = highlights_index.query(rid, date=date, candidate_id=candidate_id,
+                                     keyword=keyword, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": "高光索引读不出来：" + type(exc).__name__ + ": " + str(exc)}, ensure_ascii=False)
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
 def main() -> None:

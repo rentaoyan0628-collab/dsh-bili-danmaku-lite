@@ -134,6 +134,26 @@ dsh plugin --profile desktop add dsh-bili-danmaku-lite
 - CPU 转写吃资源：`small` 模型在普通台式机上大约是「十几秒一段、延迟十几到几十秒」。想更快就降模型或加大 `window`。
 - 转写一定有错字，自动陪聊的提示里已经写明「这是语音转写、可能有错，别当画面描述」。
 - 文本会随自动陪聊的 prompt 交给你选的那个模型供应商。不想要就只开转写、不开自动陪聊。
+## 高光时间点（v0.5.0，可选）
+
+直播结束后可以离线算一遍：哪一段弹幕突然变密、哪一段好几个人同时在反应，输出「候选时间点 + 为什么 + 当时弹幕」，方便事后回看或剪片。全程只读本机日志，不联网、不采集、不看画面。
+
+```bash
+# 1) 分析日志 → 报告（纯标准库；路径换成你自己的）
+python python/highlights_analyze.py --room 5370564 --source-timezone Asia/Shanghai \
+  --danmaku "$DSH_HOME/bili-live/live-chat/5370564/danmaku.jsonl" \
+  --audio-log "$DSH_HOME/bili-live/live-chat/5370564/audio.log" --out ./hl
+
+# 2) 报告 → 脱敏索引（模型查的是这份：没有本机路径、没有观众原文）
+python python/highlights_index.py --build ./hl/highlights.json
+```
+
+索引落在 `$DSH_BILI_LIVE_HOME/highlights/<房间号>/index.json`，之后用 `bili_highlights` 查。
+
+判断规则（写在脚本里，可以按自己直播间改）：30 秒内 ≥4 条且 ≥3 个不同的人，并且密度 ≥ 前 5 分钟 30 秒均值的 2 倍（基线最低按 1 算）；或者 60 秒内 ≥3 人同一种反应（喝彩 / 搞笑）。欢迎、告别、提到机器人的弹幕不计入；历史回填的弹幕不参与密度。
+
+边界：只给**北京时间**，不是录播时间码（没有录播起点）；证据是文字，画面要人回看确认。
+
 ## 给模型的工具
 
 | 工具 | 作用 |
@@ -148,6 +168,7 @@ dsh plugin --profile desktop add dsh-bili-danmaku-lite
 | `bili_live_doctor` | 环境自检（Python / 依赖 / 凭证路径） |
 | `bili_live_audio_start` / `audio_stop` / `audio_status` | 听声音（语音转写）的开关与状态 |
 | `bili_live_transcript` | 读最近的语音转写（带时间戳） |
+| `bili_highlights` | 查离线算好的高光时间点（哪一段弹幕突然变密 + 当时弹幕，只读） |
 | `bili_live_asr_probe` | 转写体检：GPU 能不能用、whisper.cpp / DirectML 在不在 |
 
 ## 配置
@@ -206,6 +227,7 @@ bili_credential.json     B站 凭证（本机，不进仓库）
 live-allow.json          放行名单（只有人能改）
 live-requests.jsonl      待批申请（模型写的）
 live-chat/<房间>/        弹幕流、hint、queue、worker.log、watch.json
+highlights/<房间>/index.json  高光索引（脱敏，给模型查）
 logs/danmaku.jsonl       每次发送（含草稿/被拦/失败）
 logs/plugin.log          插件自己的日志
 ```
